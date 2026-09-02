@@ -1,0 +1,27 @@
+[Unit]
+Description=LearnUs archive, OneDrive export, and daily report
+Documentation=file:/root/yonstudy/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/yonstudy
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/yonstudy/yonstudy.env
+ExecStart=/usr/bin/flock -E 0 -n /run/yonstudy/automation.lock /usr/bin/python3 /root/yonstudy/cli.py automate
+UMask=0077
+RuntimeDirectory=yonstudy
+RuntimeDirectoryMode=0700
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/yonstudy/store /root/yonstudy/exports /root/.config/rclone
+
+[Install]
+WantedBy=multi-user.target

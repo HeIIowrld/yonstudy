@@ -1,0 +1,12 @@
+[Unit]
+Description=Check due LearnUs lectures three times daily with load-spreading jitter
+
+[Timer]
+OnCalendar=*-*-* 10,15,20:00:00 Asia/Seoul
+Persistent=true
+RandomizedDelaySec=40m
+AccuracySec=1m
+Unit=yonstudy-watch.service
+
+[Install]
+WantedBy=timers.target

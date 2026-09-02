@@ -1,0 +1,27 @@
+[Unit]
+Description=Play one due LearnUs lecture and verify progress
+Documentation=file:/root/yonstudy/README.md
+Wants=network-online.target
+After=network-online.target yonstudy-daily.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/yonstudy
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/yonstudy/yonstudy.env
+ExecStart=/usr/bin/flock -E 0 -n /run/yonstudy/automation.lock /root/yonstudy/.venv/bin/python /root/yonstudy/cli.py scheduled-watch --limit 1
+UMask=0077
+RuntimeDirectory=yonstudy
+RuntimeDirectoryMode=0700
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/yonstudy/store
+
+[Install]
+WantedBy=multi-user.target
