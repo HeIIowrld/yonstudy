@@ -1,7 +1,4 @@
-"""아카이브 저장소 — SQLite 메타데이터 + 콘텐츠 주소 방식 blob 저장.
-
-같은 파일이 여러 강좌에 중복돼도 blob은 sha256 하나만 남는다.
-"""
+"""SQLite 메타데이터와 sha256 기반 blob을 관리한다."""
 
 from __future__ import annotations
 
@@ -158,7 +155,7 @@ class Store:
                 col_type = rest.split("--")[0].strip().rstrip(",")
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
 
-    # ---- blob ----
+    # 파일 blob
 
     def put_blob(self, data: bytes) -> tuple[str, int]:
         digest = hashlib.sha256(data).hexdigest()
@@ -209,7 +206,7 @@ class Store:
         )
 
     def has_missing_file(self, cmid: int, role: str) -> bool:
-        """로컬 blob 또는 OneDrive 직접 저장에 실패해 다시 받아야 하는가."""
+        """로컬이나 remote에 저장되지 않아 다시 받아야 하는지 확인한다."""
         return (
             self.db.execute(
                 """
@@ -223,7 +220,7 @@ class Store:
             is not None
         )
 
-    # ---- upsert ----
+    # 메타데이터 저장
 
     def _upsert(self, table: str, key: str, row: dict) -> None:
         cols = ", ".join(row)
@@ -401,7 +398,7 @@ class Store:
     def commit(self) -> None:
         self.db.commit()
 
-    # ---- 조회 ----
+    # 조회
 
     def query(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         return self.db.execute(sql, args).fetchall()

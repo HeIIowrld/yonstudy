@@ -1,4 +1,4 @@
-"""LearnUs 자료와 게시글을 OneDrive가 읽기 좋은 폴더로 내보낸다."""
+"""LearnUs 자료와 게시글을 보통 파일과 폴더로 내보낸다."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class ExportResult:
     missing_blobs: int = 0
 
 
-def export_onedrive_tree(
+def export_tree(
     store,
     destination: str | Path,
     *,
@@ -179,3 +179,7 @@ def export_onedrive_tree(
             encoding="utf-8",
         )
     return result
+
+
+# 예전 이름으로 불러오는 사용자를 위해 남겨 둔다.
+export_onedrive_tree = export_tree

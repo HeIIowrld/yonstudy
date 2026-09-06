@@ -1,90 +1,191 @@
 # yonstudy
 
-연세대 LearnUs 아카이버 + 강의 학습 도우미.
+LearnUs에 흩어져 있는 강의자료, 게시글, 제출 현황, 동영상 진도를 로컬
+SQLite에 모아 보는 명령행 도구다. 학기가 지난 뒤 자료를 찾을 때마다 강의실을
+하나씩 열어 보는 게 번거로워서 만들었다.
 
-LearnUs 활동 메타데이터를 로컬에서 검색 가능하게 만들고, 새 강의자료와 첨부파일은
-로컬 사본 없이 OneDrive로 직접 저장한다. 동영상 진도 자동 완성도 포함한다.
+아카이브는 중간에 끊겨도 다시 실행하면 이어서 진행한다. 수집한 파일은 로컬에
+남겨도 되고, rclone을 통해 OneDrive, SMB, SFTP, WebDAV 저장소로 바로 보낼 수도
+있다. Synology NAS는 SMB, SFTP, WebDAV 중 NAS에서 켜 둔 프로토콜을 사용하면 된다.
 
-**현재 아카이브 상태** (2026-08-02 기준, 실측)
+## 주요 기능
 
-| 항목 | 수량 |
-|---|---:|
-| 강좌 | 49 (2022~2026, 12개 학기) |
-| 활동 | 2,045 |
-| 동영상 | 697 (진도 100% = 624) |
-| 제출형 활동 | 377 (제출 확인 296) |
-| 게시판·포럼 글 | 1,697 (111개 게시판) |
-| 파일 | 1,406개 |
-| 자막 | 150 |
-| 디스크 | 1.5GB (논리 4.0GB, sha256 중복제거) |
+- 강좌, 활동, 첨부파일, 게시판·포럼 글 증분 수집
+- VOD 재생 정보와 온라인 출석부 진도 확인
+- 오늘 공개된 자료, 남은 과제, 미수강 영상을 묶은 일일 리포트
+- 강의 자료와 게시글을 학기/과목 구조로 내보내기
+- rclone remote로 로컬 staging 없이 업로드
+- 선택 기능: 오디오 추출, 자막과 강의안 정렬, 브라우저 재생
 
----
+코어 기능은 Python 표준 라이브러리만 사용한다. Python 3.10 이상과 Linux에서 주로
+개발했다.
 
 ## 설치
 
-핵심 기능은 **파이썬 표준 라이브러리만** 쓴다. 선택 기능만 의존성이 필요하다.
-
 ```bash
-cd /root/yonstudy
+git clone https://github.com/HeIIowrld/yonstudy.git
+cd yonstudy
 python3 -m venv .venv
-
-# 슬라이드 분석용
-.venv/bin/pip install pypdf
-
-# 오디오 추출용
-apt-get install -y ffmpeg
-
-# 로컬 전사(STT)용
-.venv/bin/pip install faster-whisper
-
-# 자동수강용 — 설치 후 코드가 H.264/AAC 지원 여부를 실행 전에 검사한다
-.venv/bin/pip install playwright && .venv/bin/playwright install chromium
+. .venv/bin/activate
 ```
 
-## 사용
+일반 아카이빙은 추가 Python 패키지 없이 돌아간다. 아래 항목은 필요한 기능만 설치하면
+된다.
 
 ```bash
-python3 cli.py login                       # 연세 SSO 로그인 (쿠키 저장)
-python3 cli.py courses                     # 내 강좌 전체 목록
-python3 cli.py archive                     # 전 학기 아카이빙 (영상 본체 제외)
-python3 cli.py archive --year 2026         # 특정 연도만
-python3 cli.py archive --course 285311     # 특정 강좌만
-python3 cli.py status                      # 아카이브 현황
+# 오디오·영상 추출
+sudo apt install ffmpeg
 
-python3 cli.py audio --limit 10            # 동영상에서 오디오만 추출 (opus)
-python3 cli.py analyze --cmid 4333924      # 슬라이드 ↔ 자막 정렬 분석
+# PDF 강의안 분석
+python -m pip install pypdf
 
-python3 cli.py plan                        # 자동수강 대상/우선순위
-python3 cli.py watch --dry-run             # 재생 계획 확인
-python3 cli.py watch                       # 실제 재생 (진도 채우기)
+# 로컬 음성 전사
+python -m pip install faster-whisper
 
-python3 cli.py report --sync               # 오늘 공개/완료/공지/할 일 확인
-python3 cli.py report --sync --email-to me@example.com
-python3 cli.py export-onedrive --dry-run    # 자료·Q&A 내보내기 계획
-python3 cli.py automate --dry-run           # 백그라운드 작업 전체 점검
-python3 cli.py scheduled-watch --dry-run    # 다음 자동수강 1편과 정상 마감 확인
-python3 cli.py archive-only --dry-run       # 진도 비추적 VOD의 OneDrive 보관 계획
+# 실제 브라우저 재생
+python -m pip install playwright
+python -m playwright install chromium
 ```
 
-## 일일 리포트와 메일
+저장 경로를 먼저 지정해 두면 다른 계정이나 설치 경로에서도 코드를 고칠 필요가 없다.
 
-`report`는 **한국시간(KST)** 기준으로 현재 학기를 가볍게 동기화한 뒤 아래를 구분해 보여준다.
+```bash
+export YONSTUDY_STORE="$PWD/store"
+export LEARNUS_COOKIES="$PWD/store/learnus-cookies.txt"
+```
 
-- 오늘 공개된 활동
-- 직전 동기화 이후 100%가 된 것으로 확인된 영상·완료된 제출
-- 새 게시글을 Q&A·공지·자료·기타로 분류하고 본문 요약과 링크 표시
-- 새 강의자료와 게시판 첨부(동일 파일 해시 중복 제거)
-- 미완료 항목의 정상 마감·지각 마감·남은 영상시간·권장 처리일
-- 이번 학기 과목별 동영상 수강률과 전체 강의별 완료·진도·남은 시간·공개 예정 목록
-- 이번 학기 전체 과제·퀴즈 등 제출 활동의 제출 완료·미제출·공개 예정 목록
-- 현재 남은 미수강 영상과 미제출 활동, 오늘 새로 확인된 완료 상세
+`store/`, 쿠키, `.env` 파일은 Git에 올라가지 않도록 `.gitignore`에 등록되어 있다.
 
-세션이 만료됐으면 먼저 `python3 cli.py login`을 실행해야 한다. `--sync` 없이 오래된 DB를
-읽으면 리포트 첫머리에 오래된 데이터라는 경고가 나온다.
+## 처음 실행
 
-메일은 `--email-to` 또는 `YONSTUDY_REPORT_TO`로 받는 주소를 지정한다. SMTP를 쓸 때는
-아래 환경변수를 설정한다. 설정이 없으면 로컬 Postfix의 `/usr/sbin/sendmail`을 사용하지만,
-Postfix의 외부 발송 설정 여부에 따라 실제 배달은 실패할 수 있다.
+```bash
+python cli.py login
+python cli.py courses
+python cli.py archive --year 2026
+python cli.py status
+```
+
+`login`은 비밀번호를 터미널에서만 받고 파일에 쓰지 않는다. 대신 로그인 쿠키를
+저장하며 파일 권한은 600으로 설정한다. 세션이 만료되면 `login`을 다시 실행하면
+된다.
+
+자주 쓰는 명령은 다음과 같다.
+
+```bash
+python cli.py archive --course 285311       # 특정 강좌만 수집
+python cli.py report --sync                  # 이번 학기 상태를 갱신한 뒤 리포트
+python cli.py export --dry-run               # 로컬 내보내기 계획
+python cli.py monitor                        # 재생 없이 VOD와 출석부 갱신
+python cli.py download --limit 10            # 오디오와 슬라이드 프레임 추출
+python cli.py analyze --cmid 4333924         # 강의안과 자막 정렬
+```
+
+전체 옵션은 `python cli.py <명령> --help`로 확인할 수 있다.
+
+## 원격 저장소 연결
+
+업로드 코드는 특정 서비스 API를 직접 사용하지 않고 rclone remote를 사용한다. 현재
+사용하는 `lsjson`, `rcat`, `copyto`, `moveto`는 OneDrive, SMB, SFTP, WebDAV 백엔드에서
+모두 제공되는 공통 명령이다.
+
+먼저 rclone을 설치하고 remote 하나를 만든다.
+
+```bash
+sudo apt install rclone
+rclone version
+rclone config
+rclone listremotes
+rclone lsd <remote>:
+```
+
+SMB 백엔드는 rclone 1.60부터 들어 있으므로 그보다 오래된 버전이면
+[rclone 공식 설치 안내](https://rclone.org/install/)에 따라 새 버전을 설치한다.
+
+연결 형태에 따라 `rclone config`에서 아래 저장소를 고르면 된다.
+
+| 사용처 | rclone 백엔드 | remote 경로 예시 | 메모 |
+|---|---|---|---|
+| OneDrive | `onedrive` | `onedrive:yonstudy` | 처음 한 번 Microsoft 로그인 승인 필요 |
+| Synology/Windows 공유 | `smb` | `nas:home/yonstudy` | 첫 경로 요소는 SMB 공유 이름 |
+| Synology/Linux 서버 | `sftp` | `nas-sftp:/volume1/archive/yonstudy` | 비밀번호보다 SSH 키 권장 |
+| Synology/Nextcloud 등 | `webdav` | `nas-webdav:yonstudy` | HTTPS URL 사용 권장 |
+
+설정할 때 필요한 값은 많지 않다. SMB는 서버 주소, 사용자, 비밀번호와 공유 이름이
+필요하고 기본 포트는 445다. SFTP는 서버 주소, 사용자, SSH 키 경로가 기본이며 포트는
+22다. WebDAV는 HTTPS URL, 사용자, 비밀번호를 넣고 일반 서버라면 vendor를 `other`로
+고르면 된다. 비밀번호는 셸 명령 인자로 넘기지 말고 `rclone config` 안에서 입력한다.
+
+Synology에서는 DSM의 파일 서비스(SMB/SFTP) 또는 WebDAV Server 패키지 중 하나를 먼저
+켜야 한다. 접속 계정은 백업용 공유 폴더에만 쓰기 권한을 주는 편이 안전하다.
+WebDAV는 가능하면 HTTP 대신 HTTPS를 사용한다.
+SFTP는 `known_hosts_file`을 지정해 서버 키를 확인하는 편이 좋다. Synology SFTP에서
+해시 계산 경로 오류가 나면 [rclone SFTP 안내](https://rclone.org/sftp/)의
+`path_override` 또는 `disable_hashcheck` 설정을 확인한다.
+
+연결을 확인했으면 yonstudy에 remote를 넘긴다.
+
+```bash
+export YONSTUDY_REMOTE='nas:home/yonstudy'
+
+# 업로드 대상 개수만 확인. remote에 접속하지 않음
+python cli.py upload --dry-run --year 2026 --semester 2학기
+
+# 이미 수집한 로컬 자료와 게시글 업로드
+python cli.py upload --year 2026 --semester 2학기
+
+# 현재 학기 수집, 업로드, 리포트를 한 번에 실행
+python cli.py automate --no-mail
+```
+
+`upload` 결과의 `missing_sources`가 0보다 크면 로컬 blob이 없는 항목이다. 예전에
+다른 remote로 바로 보낸 자료일 수 있으므로 `archive`로 원본을 다시 받은 뒤
+`upload`를 한 번 더 실행한다.
+
+`--remote nas:home/yonstudy`처럼 명령행에서 바로 지정해도 된다. 예전 설정과의 호환을
+위해 `YONSTUDY_ONEDRIVE_REMOTE`, `--no-onedrive`, `export-onedrive` 이름도 계속 받지만,
+새 설정에서는 `YONSTUDY_REMOTE`, `--no-upload`, `export`를 쓰는 것을 권장한다.
+
+rclone은 설정 파일의 비밀번호를 단순히 가려서 저장하며 강하게 암호화하지는 않는다.
+`rclone.conf`의 권한을 600으로 유지하고, 여러 사용자가 같이 쓰는 서버에서는 계정별
+설정 파일을 분리하는 것이 좋다.
+
+## 저장 구조와 동기화 방식
+
+원격에는 다음과 같은 구조로 저장된다.
+
+```text
+2026-2/AIC2120_인공지능개론및응용/
+  W01-L01__강의자료__Lecture01__f1408.pdf
+  W01-L02__강의영상__Week 1-2__cmid4529930.mp4
+  게시판_첨부/
+  QNA_공지/
+  과제자료/
+  제출물/
+```
+
+학기 코드는 `1학기=1`, `2학기=2`, `여름계절수업=S`, `겨울계절수업=W`다. 파일명은
+Windows의 금지 문자와 경로 길이를 고려해 정리한다. 제목이 같은 파일도 겹치지 않도록
+LearnUs의 고정 ID를 파일명 끝에 붙인다.
+
+`제출물/`에는 본인이 낸 파일이 들어갈 수 있다. 이름, 학번, 과제 내용 같은 개인정보가
+섞일 수 있으므로 remote를 공개 공유 폴더로 두면 안 된다.
+
+업로드는 증분 방식이며 원격 파일을 지우지 않는다. 같은 경로에 같은 크기의 파일이
+있으면 올리지 않는다. 파일이 변경됐는데 크기가 우연히 같은 특수한 경우에는 rclone으로
+해당 원격 파일을 지운 뒤 다시 실행해야 한다.
+
+원격 저장소가 응답하지 않으면 로컬로 몰래 대체 저장하지 않고 실패 상태를 남긴다.
+다음 실행에서 다시 받거나 업로드한다. 실행 결과는 `store/automation_state.json`,
+수동 플레이백 상태는 `store/watch_state.json`에서 확인할 수 있다.
+
+`automate`는 진도 추적이 꺼진 VOD 원본도 한 번에 최대 4편까지 remote에 보관한다.
+`YONSTUDY_ARCHIVE_ONLY_LIMIT`로 수량을 바꿀 수 있으며, 따로 실행하려면
+`python cli.py archive-only --remote <remote>:경로`를 사용한다.
+
+## 리포트 메일
+
+`report`는 한국 시간을 기준으로 오늘 공개된 활동, 새 게시글, 완료된 제출, 남은
+과제와 영상을 보여 준다. SMTP 정보가 있으면 메일로도 보낼 수 있다.
 
 ```bash
 export YONSTUDY_REPORT_TO='me@example.com'
@@ -93,149 +194,61 @@ export YONSTUDY_SMTP_HOST='smtp.example.com'
 export YONSTUDY_SMTP_PORT='587'
 export YONSTUDY_SMTP_USER='me@example.com'
 export YONSTUDY_SMTP_PASSWORD='앱 비밀번호'
-python3 cli.py report --sync
+python cli.py report --sync
 ```
 
-SMTP 비밀번호는 소스 코드나 DB에 저장하지 않는다. 백그라운드 서비스에서는 별도의
-root 전용 환경 파일(권한 600)에만 직접 입력한다.
+SMTP 비밀번호는 DB에 저장하지 않는다. 정기 실행에서는 일반 사용자가 읽을 수 없는
+환경 파일에 넣는다. [systemd/yonstudy.env.example](systemd/yonstudy.env.example)을
+복사해 시작해도 된다. SMTP 설정이 없으면 `/usr/sbin/sendmail`을 찾아 사용한다.
 
-## OneDrive 자동 백업
+## 자동 실행
 
-일일 자동화는 현재 학기의 강의자료, 게시판·과제 첨부, ubboard/forum 글을 메모리에서
-OneDrive로 직접 전송한다. 로컬 export 폴더를 만들지 않으며 기존 원격 파일은 삭제하지 않는다.
+`systemd/`의 서비스 파일은 이 저장소가 `/root/yonstudy`에 설치된 서버용 예시다. 그대로
+복사하기 전에 `WorkingDirectory`, `ExecStart`, `ReadWritePaths`, `Documentation`을 실제 설치
+경로에 맞게 고쳐야 한다. rclone 설정 파일 경로도 서비스 실행 계정을 기준으로 확인한다.
 
-```text
-<연도>-<학기코드>/<과목>/
-├── W01-L01__강의자료__<파일명>__f<파일ID>.pdf
-├── 게시판_첨부/<게시판>/
-└── QNA_공지/<게시판>/<날짜>_<글번호>_<제목>.md
-```
-
-강의자료는 별도 폴더를 만들지 않고 과목 루트에 저장한다. 파일명은 주차·차시
-`W01-L01`을 앞에 붙이며, 주차를 알 수 없으면 공개일 또는 수집일 `YYYYMMDD`를 붙인다.
-
-학기 폴더는 `1학기=1`, `2학기=2`, `여름계절수업=S`, `겨울계절수업=W`로 표기한다.
-회사 OneDrive 기준 업로드 루트는 `02_Personal/01_학교/10.학기`이며, 예를 들어
-2026-1학기 자료는 `10.학기/2026-1/<과목>/...`에 들어간다.
-
-Microsoft 계정 연결은 한 번 직접 승인해야 한다. 연세 OneDrive는 일반 `@yonsei.ac.kr`
-메일과 별개의 Office 365 계정(`사용자ID@o365.yonsei.ac.kr`)일 수 있다.
+`automate`는 현재 학기 동기화, 원격 업로드, 리포트 생성을 묶어서 실행한다.
 
 ```bash
-# remote 이름은 반드시 yonstudy-onedrive 로 지정하고 Storage에서 OneDrive를 선택
-rclone config
-rclone lsd yonstudy-onedrive:
-
-# 연결 후 즉시 한 번 실행
-systemctl start yonstudy-daily.service
-journalctl -u yonstudy-daily.service -n 100 --no-pager
+python cli.py automate --dry-run
+python cli.py automate --no-mail
+python cli.py automate --no-upload   # 메타데이터와 게시글만 갱신
 ```
 
-헤드리스 인증에서 다른 PC의 `rclone authorize`를 쓸 때는 서버와 PC의 rclone 버전을
-같게 맞춘다(현재 서버 `v1.75.0`). `config_token>`에는 일부 access token이 아니라
-authorize 명령이 출력한 첫 `{`부터 마지막 `}`까지의 JSON 전체를 한 줄로 붙여넣는다.
+## 자동 재생에 대해
 
-등록된 `yonstudy-daily.timer`는 매일 08:10 KST(최대 10분 무작위 지연)에 현재 학기의
-메타데이터·출석 상태를 동기화하고 새 파일을 OneDrive에 직접 저장한다. OneDrive가
-응답하지 않으면 파일은 로컬로 대체 저장하지 않고 실패 상태를 남겨 다음 실행에서 재시도한다.
-`yonstudy-report.timer`는 동기화가 끝난 뒤 매일 09:00 KST에 리포트를 별도로 발송한다.
-SMTP 인증이 아직 없으면 오류를 내지 않고 발송만 보류한다. LearnUs 쿠키가 만료되면
-`python3 cli.py login`을 다시 실행해야 한다.
-
-`yonstudy-keepalive.timer`는 2시간마다 읽기 요청을 보내 세션의 유휴 만료를 연장한다.
-세션이 만료되면 root 전용 `/etc/yonstudy/yonstudy.env`의 `LEARNUS_ID`와 `LEARNUS_PW`로
-SSO 로그인을 자동 복구한다. 잘못된 비밀번호나 캡차로 계정이 잠기는 것을 막기 위해
-실패 후 재시도는 15분, 1시간, 6시간, 24시간 간격으로 점차 늦춘다. MFA/캡차가 발생하면
-자동 우회하지 않으며 브라우저에서 한 번 해제해야 한다.
-
-`yonstudy-monitor.timer`는 매일 02:00 KST에 현재 학기의 새 VOD와 온라인출석부를
-읽기 전용으로 갱신한다. 영상을 재생하거나 다운로드하지 않으며, 미완료 영상은 과목별 →
-주차 → 차시 순서로 `store/monitor_state.json`에 저장한다. 사용자가 시청한 뒤 즉시 확인할
-때는 `python3 cli.py monitor --course <course_id>`를 실행한다. 별도 호출이 없어도 08:10
-일일 동기화가 최대 학습위치와 진도율을 다시 읽고 09:00 리포트에 반영한다.
-
-`yonstudy-watch.timer`는 매일 새벽 02:30·04:00·05:30 KST(각 최대 10분 지연)에
-정상 수강기간 안의 미완료 영상 또는 완료 추적이 없는 미재생 영상을 한 편씩 재생한다.
-02:00 읽기 전용 모니터가 먼저
-새 영상과 출석 상태를 갱신한다. 낮 시간에 누락 실행되지 않도록 catch-up은 사용하지
-않는다. 모니터·자동수강·일일 동기화·리포트 작업은 같은 파일 잠금을 사용한다.
-
-진도 추적이 꺼진 VOD(`is_progress=false`)는 출석 진도 큐에는 넣지 않지만, 실제 영상을
-끝까지 한 번 재생한 뒤 `playback_once` 성공 기록을 남겨 중복 재생하지 않는다. 일일
-자동화는 해당 영상 원본도 최대 4편씩 읽어 같은 학기·과목 OneDrive 폴더에 직접 보관하고
-임시 로컬 파일은 즉시 삭제한다. `YONSTUDY_ARCHIVE_ONLY_LIMIT`로 일일 상한을 바꿀 수 있다.
-
-설정 파일은 `/etc/yonstudy/yonstudy.env`(권한 600), 서비스는
-`/etc/systemd/system/yonstudy-daily.service`, 타이머는
-`/etc/systemd/system/yonstudy-daily.timer`다. `@yonsei.ac.kr` 메일은 Gmail SMTP를
-사용하도록 준비되어 있으며 Google 앱 비밀번호를 아래 항목에 직접 넣어야 실제 메일이 발송된다.
+`watch` 및 `scheduled-watch`는 Playwright로 영상을 실제 재생한다. 서버의 진도 API를 직접
+조작하지는 않지만, 자동 재생 자체가 수업 또는 학교 규정에 어긋날 수 있다. 관련 규정을
+확인하고 본인 계정에서만 사용해야 한다. 처음에는 반드시 계획만 확인한다.
 
 ```bash
-sudoedit /etc/yonstudy/yonstudy.env
-# YONSTUDY_SMTP_PASSWORD=발급한_앱_비밀번호
-systemctl start yonstudy-daily.service
+python cli.py plan
+python cli.py watch --dry-run
 ```
 
-자동수강 상태는 `store/watch_state.json`, 일일 동기화·메일 상태는
-`store/automation_state.json`에서 확인한다.
+## 사용 범위와 배포 전 확인할 것
 
-## 평면형 개인 아카이브
+자신이 접근 권한을 가진 강좌에서, 개인적으로 필요한 범위만 수집하는 것을 전제로 한다.
+강의자료와 영상의 저작권은 각 권리자에게 있으므로, 생성된 아카이브를 재배포해서는 안 된다.
+LearnUs 약관, 학교 규정, 수업별 안내를 우선한다.
 
-OneDrive 트리가 깊어지지 않도록 강의자료에는 주차·차시·종류를 파일명 접두어에 넣는
-`flat-v2` 구조를 사용한다. 게시글과 향후 영상까지 포함한 전체 배치는 아래 명령으로
-계획만 확인할 수 있다.
+코드 자체를 공개 배포하려면 아래도 한 번 확인하는 것이 좋다.
 
-```text
-2026-2/AIC2120_인공지능개론및응용/
-  W01-L01__강의영상__Week 1-1__cmid4529929.mp4
-  W01-L01__강의자료__Lecture01__f1408.pptx
-  W01-L02__강의자료__Lecture02__f1407.pdf
-  W00-L00__공지__20260901_Welcome to AIC 2120__p2289406.md
-```
-
-`W00-L00`은 특정 주차에 속하지 않는 공통 공지·Q&A다. 파일 끝에는 LearnUs/DB의
-고정 식별자를 붙여 제목이 같아도 충돌하지 않는다. Windows 전체 경로 제한을 고려해
-파일명은 UTF-8 150바이트 이하로 제한한다.
-
-```bash
-# 읽기 전용 계획 확인. 실제 파일은 만들지 않는다.
-python3 cli.py layout-plan --year 2026 --semester 2학기
-```
-
-향후 활성화할 준비 흐름은 `과목 새로고침 → 자료/게시판 수집 → 평면 파일명 생성 →
-사용자가 시청 → 원본 MP4 개인 아카이브 → 온라인출석부 읽기 전용 확인 → 리포트` 순서다.
-영상 원본은 기존 HLS를 ffmpeg `-c copy`로 한 번만 읽어 저장하고, 오디오·프레임 같은
-파생물은 기본 생성하지 않는다. 자동 출석 재생과 OneDrive 업로드에는 연결하지 않는다.
-
-기본 첨부 한도는 512MB이며 `YONSTUDY_MAX_FILE_MB`로 조정할 수 있다.
-
-주요 옵션
-
-| 옵션 | 기본 | 설명 |
-|---|---|---|
-| `--interval` | 0.4 | 요청 간 최소 간격(초) |
-| `--per-minute` | 40 | 분당 요청 상한 |
-| `--board-pages` | 3 | 게시판당 목록 페이지 수 (0=전체) |
-| `--no-vod` / `--no-files` / `--no-boards` | | 해당 단계 생략 |
-
-**로그인은 터미널에서 직접 실행**하세요. 비밀번호는 `getpass`로만 받고 디스크에 쓰지 않습니다.
-저장되는 것은 쿠키 파일뿐이며 권한은 600입니다.
-
-## 안전 원칙
-
-- **읽기 전용.** 글쓰기·과제 제출·설정 변경 API는 코드에 넣지 않았다.
-- **증분.** 이미 받은 것은 건너뛴다. 중단 후 같은 명령을 다시 실행하면 이어받는다.
-- **영상 본체는 저장하지 않는다.** 전사가 필요하면 오디오만 뽑는다.
-- **자동수강은 실제 재생만 한다.** 진도 로그를 직접 POST로 위조하지 않는다.
-  자동 재생은 학칙상 부정수강으로 해석될 소지가 있고, 책임은 계정 주인에게 간다.
+- `store/`, `exports/`, 쿠키, `.env`, 로그가 커밋에 들어가지 않았는지 확인
+- `systemd/` 예시의 절대 경로와 메일 주소 같은 개인 설정 제거
+- `LICENSE`와 사용한 외부 패키지의 라이선스 조건 확인
+- 실제 계정 없이 실행할 수 있는 테스트와 환경별 설치 절차 확인
 
 ## 문서
 
-| 문서 | 내용 |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 모듈 구조, 데이터 모델, 저장소 레이아웃 |
-| [docs/LEARNUS.md](docs/LEARNUS.md) | LearnUs/coursemos 리버스 엔지니어링 레퍼런스 — 엔드포인트·DOM·함정 |
-| [docs/FINDINGS.md](docs/FINDINGS.md) | 실측 데이터 — 커버리지, 용량 벤치마크, ASR 성능 |
-| [docs/STUDYKIT.md](docs/STUDYKIT.md) | 전사·슬라이드 정렬·hotword 설계와 한계 |
-| [docs/AUTOPLAY.md](docs/AUTOPLAY.md) | 진도 처리 방식 분석과 자동수강 구현 |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | 검증된 것 / 안 된 것 / 다음 할 것 |
+- [구조와 데이터 모델](docs/ARCHITECTURE.md)
+- [LearnUs 페이지·엔드포인트 메모](docs/LEARNUS.md)
+- [아카이브 실측 결과](docs/FINDINGS.md)
+- [전사와 강의안 정렬](docs/STUDYKIT.md)
+- [재생과 진도 처리](docs/AUTOPLAY.md)
+- [현재 상태와 남은 일](docs/ROADMAP.md)
+
+## 라이선스
+
+이 프로젝트의 코드는 [Apache License 2.0](LICENSE)으로 배포한다. 강의자료, 영상과 같이
+프로그램으로 수집한 콘텐츠에는 이 라이선스가 적용되지 않는다.

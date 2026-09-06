@@ -1,4 +1,4 @@
-"""일일 동기화 → OneDrive 직접 저장 → 메일 리포트."""
+"""일일 동기화, 원격 백업, 메일 리포트를 한 번에 실행한다."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .daily import (
     SEOUL, build_daily_report, current_term, render_email_text,
     render_report, render_report_html, send_report,
 )
-from .onedrive import RcloneOneDrive, sync_onedrive_tree
+from .remote import RcloneRemote, sync_remote_tree
 from .store import Store
 from .video_archive import archive_untracked_vods
 
@@ -29,8 +29,12 @@ def run_daily_automation(
     sync: bool = True,
     dry_run: bool = False,
     send_mail: bool = True,
-    export_onedrive: bool = True,
+    export_onedrive: bool | None = None,
+    upload_remote: bool | None = None,
 ) -> tuple[int, dict]:
+    if upload_remote is None:
+        upload_remote = True if export_onedrive is None else export_onedrive
+
     now = datetime.now(SEOUL)
     target = now.date()
     year, semester = current_term(target)
@@ -41,7 +45,7 @@ def run_daily_automation(
         "semester": semester,
         "sync": {"status": "skipped"},
         "export": {},
-        "onedrive": {},
+        "upload": {},
         "video_archive": {"status": "skipped"},
         "mail": {"status": "skipped"},
     }
@@ -49,9 +53,9 @@ def run_daily_automation(
     sink = None
     client = None
     sink_error = None
-    if export_onedrive and not dry_run:
+    if upload_remote and not dry_run:
         try:
-            sink = RcloneOneDrive(remote)
+            sink = RcloneRemote(remote)
         except Exception as exc:
             sink_error = str(exc)
             exit_code = 1
@@ -74,7 +78,7 @@ def run_daily_automation(
                         course,
                         probe_vod=True,
                         fetch_subtitles=False,
-                        # OneDrive가 없으면 로컬로 대체 저장하지 않는다.
+                        # remote 연결이 없으면 첨부파일은 다음 실행에서 다시 받는다.
                         fetch_files=sink is not None,
                         fetch_boards=True,
                         board_pages=3,
@@ -94,25 +98,25 @@ def run_daily_automation(
             state["sync"] = {"status": "error", "message": str(exc)}
             exit_code = 1
 
-    if export_onedrive:
+    if upload_remote:
         state["export"] = {
             "status": "not_used",
             "mode": "direct-no-local-staging",
             "legacy_destination": export_dir,
         }
         if dry_run:
-            state["onedrive"] = {"status": "dry_run", "remote": remote}
+            state["upload"] = {"status": "dry_run", "remote": remote}
         elif sink is None:
-            state["onedrive"] = {
+            state["upload"] = {
                 "status": "error", "remote": remote,
-                "message": sink_error or "OneDrive 직접 저장을 초기화하지 못했습니다",
+                "message": sink_error or "원격 저장소를 초기화하지 못했습니다",
             }
         else:
             try:
-                direct = sync_onedrive_tree(store, sink, year=year, semester=semester)
-                state["onedrive"] = {"status": "ok", **direct.__dict__}
+                direct = sync_remote_tree(store, sink, year=year, semester=semester)
+                state["upload"] = {"status": "ok", **direct.__dict__}
             except Exception as exc:
-                state["onedrive"] = {
+                state["upload"] = {
                     "status": "error", "remote": remote, "message": str(exc),
                 }
                 exit_code = 1
@@ -137,14 +141,14 @@ def run_daily_automation(
             "status": "disabled",
             "message": "로컬 대체 저장 없이 파일 수집을 생략",
         }
-        state["onedrive"] = {
+        state["upload"] = {
             "status": "disabled",
             "remote": remote,
-            "message": "OneDrive 직접 저장 비활성화",
+            "message": "원격 저장 비활성화",
         }
         state["video_archive"] = {
             "status": "disabled",
-            "message": "OneDrive 직접 저장 비활성화",
+            "message": "원격 저장 비활성화",
         }
 
     report = build_daily_report(store, target=target, year=year, semester=semester)
@@ -187,6 +191,8 @@ def run_daily_automation(
         }
 
     state["finished_at"] = datetime.now(SEOUL).strftime("%Y-%m-%dT%H:%M:%S%z")
+    # 2026-09 이전 상태 파일을 읽는 스크립트를 위한 호환 키다.
+    state["onedrive"] = state["upload"]
     if not dry_run:
         Path(store_path, "automation_state.json").write_text(
             json.dumps(state, ensure_ascii=False, indent=2) + "\n",

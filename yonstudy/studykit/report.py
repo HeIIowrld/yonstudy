@@ -1,11 +1,4 @@
-"""강의 1편을 분석해 학습 자료를 만든다.
-
-출력:
-  * 슬라이드별 담당 구간 (몇 분 몇 초부터)
-  * 슬라이드가 새로 도입한 용어
-  * 그 구간에서 말로만 등장한 용어 (= 필기해야 할 내용)
-  * 마크다운 강의 노트
-"""
+"""한 강의의 슬라이드와 전사를 맞춰 마크다운 노트를 만든다."""
 
 from __future__ import annotations
 
@@ -55,8 +48,7 @@ def analyze_lecture(store, cmid: int, slides: str | None = None, window: float =
     if slides:
         pdf, pdf_name, pick_score = Path(slides), Path(slides).name, None
     else:
-        # 제목 규칙이 강좌마다 달라 위치만으로 고르면 엉뚱한 장을 집는다(실측).
-        # 후보를 넓게 모은 뒤 전사 내용과 대조해 고른다.
+        # 제목 규칙이 일정하지 않아 후보의 본문을 전사 내용과 대조한다.
         best = A.pick_slides(S.slide_candidates(store, cmid), transcript_text)
         if not best:
             print("  강의안 PDF 후보가 없습니다. 전사만으로 요약합니다.")
@@ -84,8 +76,7 @@ def analyze_lecture(store, cmid: int, slides: str | None = None, window: float =
 
     texts = [pages[i] for i in nonempty]
 
-    # 한국어 음성 + 영어 슬라이드 조합은 공유 어휘가 거의 없어 텍스트 정렬이 성립하지 않는다
-    # (실측: 생산시스템분석 강의에서 공통 토큰 3개). 억지로 타임라인을 만들지 않는다.
+    # 음성과 슬라이드의 문자 체계가 다르면 텍스트 정렬 결과를 사용하지 않는다.
     s_script, t_script = A.script_of("\n".join(texts)), A.script_of(transcript_text)
     if s_script != t_script and "mixed" not in (s_script, t_script):
         print(f"  ! 언어 불일치: 슬라이드={s_script}, 전사={t_script}")

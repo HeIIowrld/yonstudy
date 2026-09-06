@@ -4,37 +4,36 @@
 
 ```
 yonstudy/
-├── cli.py                  login / courses / archive / status / audio / plan / watch / analyze
+├── cli.py                  명령행 진입점
 ├── yonstudy/
-│   ├── client.py   251줄   SSO 로그인 + 인증 HTTP + 스로틀 + 쿠키 관리   (표준 라이브러리만)
-│   ├── parse.py    780줄   모든 HTML 파싱을 한 곳에 모음                 (표준 라이브러리만)
-│   ├── store.py    240줄   SQLite(WAL) + sha256 blob + 스키마 마이그레이션 (표준 라이브러리만)
-│   ├── archive.py  360줄   순회 크롤러 — 읽기 전용·증분                   (표준 라이브러리만)
-│   ├── vod.py      150줄   HLS → 오디오 추출                            (ffmpeg 필요)
-│   ├── autoplay.py 300줄   진도 스케줄러 + 재생 워커                      (Playwright 필요)
+│   ├── client.py            SSO 로그인, HTTP 요청, 속도 제한
+│   ├── parse.py             LearnUs HTML 파서
+│   ├── store.py             SQLite, sha256 blob, 스키마 마이그레이션
+│   ├── archive.py           읽기 전용 증분 수집
+│   ├── remote.py            rclone 원격 업로드
+│   ├── export.py            로컬 폴더 내보내기
+│   ├── daily.py             일일 리포트와 메일
+│   ├── vod.py               HLS 산출물 추출(ffmpeg)
+│   ├── autoplay.py          진도 스케줄러와 재생 워커(Playwright)
 │   └── studykit/
-│       ├── slides.py 125줄  PDF 슬라이드 추출, 강의안 후보 탐색            (pypdf 권장)
-│       ├── align.py  340줄  TF-IDF·DTW 정렬, hotword 추출, 언어 감지      (표준 라이브러리만)
-│       └── report.py 150줄  슬라이드별 타임라인·노트 생성                  (표준 라이브러리만)
+│       ├── slides.py         PDF 슬라이드 추출, 강의안 후보 탐색
+│       ├── align.py          TF-IDF·DTW 정렬, hotword 추출, 언어 감지
+│       └── report.py         슬라이드별 타임라인과 노트 생성
 └── store/                  아카이브 실체
 ```
 
-**의존성을 층으로 나눈 이유**: 아카이빙(가장 중요하고 자주 도는 부분)은 `pip install` 없이
-어디서든 돌아야 한다. 무거운 의존성은 오디오·전사·자동수강에만 격리했다.
+아카이빙은 별도 Python 패키지 없이 돌 수 있게 두고, 무거운 의존성은 오디오·전사·재생
+기능에만 격리했다.
 
 ## 데이터 흐름
 
 ```
 LearnUs ──client──▶ archive ──parse──▶ store (SQLite + blobs)
                                           │
-                        ┌─────────────────┼──────────────────┐
-                        ▼                 ▼                  ▼
-                    vod.py            autoplay.py        studykit/
-                 HLS→오디오          진도 스케줄러      슬라이드↔전사 정렬
-                        │                                     │
-                        ▼                                     ▼
-                  faster-whisper                        마크다운 노트
-                  (또는 VibeVoice-ASR)
+                        ┌─────────────────┼──────────────────┬──────────────┐
+                        ▼                 ▼                  ▼              ▼
+                    vod.py            autoplay.py        studykit/      remote.py
+                 HLS 산출물 추출      진도 스케줄러      슬라이드 정렬   rclone 업로드
 ```
 
 ## 저장소 레이아웃
@@ -54,8 +53,8 @@ store/
     └── forum_posts.json            내가 쓴 포럼 글
 ```
 
-논리 용량 4.0GB가 디스크에서는 1.5GB다 — 같은 파일이 여러 강좌·역할에 걸려 있어도
-blob은 sha256 하나만 남고 강좌 폴더에는 하드링크만 건다.
+같은 파일이 여러 강좌나 역할에 걸쳐 있어도 blob은 sha256 하나만 남고 강좌 폴더에는
+하드링크만 건다.
 
 ## 데이터 모델
 

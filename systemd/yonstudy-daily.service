@@ -1,5 +1,5 @@
 [Unit]
-Description=LearnUs sync and direct OneDrive upload
+Description=LearnUs sync and remote archive upload
 Documentation=file:/root/yonstudy/README.md
 Wants=network-online.target
 After=network-online.target

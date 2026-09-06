@@ -82,8 +82,8 @@ https://ys.learnus.org/login/token.php?username=학번&password=비번&service=m
   갱신한다. 재생 종료 뒤 진도표를 재조회해 100% 또는 완료 체크가 없으면 서비스 실패로 남긴다.
 - 스케줄러 시간 비교를 KST로 고쳤으며, 한국어 `상세보기`가 최대 시청시간 뒤에 붙을 때
   `56:40`을 56초로 오해하던 파서도 교정했다.
-- 강의자료·게시판 첨부·Q&A/공지 글의 OneDrive용 증분 내보내기와 `rclone copy` 자동화를
-  구현했고 실제 업로드를 확인했다. systemd 타이머는 매일 08:10 KST에 실행한다.
+- 강의자료·게시판 첨부·Q&A/공지 글의 rclone 증분 업로드를 구현했다. OneDrive뿐 아니라
+  SMB, SFTP, WebDAV remote도 같은 경로를 사용한다.
   Gmail 앱 비밀번호는 계정 주인이 한 번 직접 입력해야 실제 메일이 발송된다.
 
 ## 운영 메모

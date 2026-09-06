@@ -1,10 +1,4 @@
-"""LearnUs 세션 클라이언트 — SSO 로그인 + 인증된 HTTP 요청.
-
-yontil 확장(src/core/login/login-learnus.ts)의 5-step SSO 플로우를 Python으로 포팅했다.
-표준 라이브러리만 쓰므로 pip install 없이 동작한다.
-
-서버에 부담을 주지 않도록 모든 요청은 `min_interval` 간격으로 자동 스로틀된다.
-"""
+"""SSO 로그인과 요청 속도 제어를 담당하는 LearnUs HTTP 클라이언트."""
 
 from __future__ import annotations
 
@@ -27,7 +21,7 @@ UA = (
 )
 TIMEOUT = 15
 
-# yontil의 parseInputTagsFromHtml은 id 속성만 봤지만, name만 있는 폼도 있어 둘 다 수집한다.
+# SSO 폼이 id와 name을 혼용하므로 둘 다 키로 쓴다.
 _INPUT_RE = re.compile(r"<input\b[^>]*>", re.I)
 _ATTR_RE = re.compile(r"""(\w[\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))""")
 
@@ -47,10 +41,7 @@ def parse_input_tags(html: str) -> dict[str, str]:
 
 
 def rsa_pkcs1v15_encrypt_hex(modulus_hex: str, exponent_hex: str, message: str) -> str:
-    """node-forge의 rsa.setPublic(n, e).encrypt(msg) + stringToHex와 동일한 결과를 낸다.
-
-    node-forge의 encrypt 기본 스킴은 RSAES-PKCS1-V1_5이므로 직접 패딩한다.
-    """
+    """LearnUs 로그인 폼과 같은 PKCS#1 v1.5 RSA 암호문을 만든다."""
     n = int(modulus_hex, 16)
     e = int(exponent_hex, 16)
     k = (n.bit_length() + 7) // 8
@@ -117,17 +108,10 @@ class LearnUsClient:
             time.sleep(wait)
         self._last_request = time.monotonic()
 
-    # LearnUs의 HTTP 400은 **누적 요청량** 기반 차단이다. 실측 경로:
-    #   1) "세션 만료"로 오진 → 판정 로직을 고침
-    #   2) 간격을 늘리는 적응형 스로틀 → 그래도 21/27 실패
-    #   3) 로그를 순서대로 읽어 보니: 한 강좌에서 게시글 141건을 연속으로 받은
-    #      **직후** 다음 강좌가 400이고, 5·10·20·40초(합 75초)를 기다려도 안 풀린다.
-    #      반면 몇 분 뒤 같은 주소를 열면 8/8 정상.
-    # 즉 분당 요청 수가 임계를 넘으면 수 분간 막힌다. 간격 조절만으로는 부족하고,
-    # **분당 요청 수 자체를 상한**으로 눌러야 한다.
+    # 요청이 몰리면 HTTP 400이 반복되어 분당 횟수도 제한한다.
 
     def _consume_token(self) -> None:
-        """토큰 버킷 — 최근 60초 요청 수가 상한을 넘으면 창이 빌 때까지 기다린다."""
+        """최근 60초 요청 수가 상한을 넘으면 창이 빌 때까지 기다린다."""
         now = time.monotonic()
         self._window = [t for t in self._window if now - t < 60.0]
         if len(self._window) >= self.per_minute:
@@ -141,7 +125,7 @@ class LearnUsClient:
     def _penalize(self) -> None:
         self._penalty += 1
         self.min_interval = min(self.max_interval, max(self.min_interval * 2, 1.0))
-        # 차단이 걸리면 분당 상한도 함께 낮춘다 — 간격만 벌려서는 풀리지 않는다.
+        # 간격만 늘리지 말고 1분 당 상한도 함께 낮춘다.
         self.per_minute = max(10, int(self.per_minute * 0.6))
 
     def _reward(self) -> None:
@@ -161,21 +145,8 @@ class LearnUsClient:
         self._window.clear()
         self._last_request = 0.0
 
-    # ------------------------------------------------------------------
-    # 쿠키 비대화 방지 — HTTP 400의 진짜 원인
-    #
-    # LearnUs는 "읽은 게시글" 목록을 `ubboard_read` 쿠키에 통째로 담는다.
-    # 글을 하나 열 때마다 약 60바이트씩 늘어나서, 게시판을 수집하다 보면
-    # 130건쯤에서 Cookie 헤더가 Apache 기본 상한(LimitRequestFieldSize 8190)을 넘고
-    # 그 순간부터 **모든 요청이 HTTP 400**이 된다.
-    #
-    # 이게 다음을 전부 설명한다:
-    #   * 한 강좌에서 141건을 받은 직후 다음 강좌가 400
-    #   * 몇 분을 기다려도 안 풀림 (쿠키가 메모리에 그대로 남으니까)
-    #   * 같은 주소를 새 프로세스에서 열면 200 (쿠키 파일엔 없으니까)
-    # 서버 차단이 아니라 우리 쪽 상태 문제였다.
-    #
-    # 로그인·세션에 꼭 필요한 쿠키만 남기고, 커지는 추적용 쿠키는 매 요청 후 버린다.
+    # ubboard_read에 읽은 글 목록이 쌓이면 Cookie 헤더가 서버 상한을 넘는다.
+    # 세션에 필요한 쿠키는 남기고 이 추적용 쿠키는 매 요청 후 지운다.
     ESSENTIAL_COOKIES = {
         "MoodleSession", "JSESSIONID", "LEARNUS_HAVE_SSOLOGINED",
         "passni.keepLogin", "MOODLEID1_",
@@ -289,19 +260,17 @@ class LearnUsClient:
         except urllib.error.HTTPError as exc:
             return exc.read().decode("utf-8", "ignore")
 
-    # ---- SSO 5단계 (yontil login-learnus.ts와 1:1 대응) ----
+    # SSO 로그인
 
     def login(self, username: str, password: str) -> None:
-        # 1) LearnUs가 발급하는 SSO 시작 토큰 S1
-        #    확장에서는 declarative_net_request로 Referer를 강제 주입했지만
-        #    여기서는 헤더를 직접 세팅하면 되므로 별도 장치가 필요 없다.
+        # LearnUs에서 SSO 시작 토큰을 받는다.
         step1 = parse_input_tags(
             self.request(f"{LEARNUS}/passni/sso/spLogin2.php", referer=LEARNUS)
         )
         if "S1" not in step1:
             raise RuntimeError("1단계 실패: S1을 찾지 못했습니다 (SSO 진입 실패)")
 
-        # 2) 통합인증 서버에서 challenge + RSA 공개키 수령
+        # 통합인증 서버가 내려 준 challenge와 RSA 공개키를 쓴다.
         html2 = self.request(
             f"{INFRA}/sso/PmSSOService",
             data={
@@ -319,7 +288,7 @@ class LearnUsClient:
         if not challenge or not key:
             raise RuntimeError("2단계 실패: ssoChallenge / RSA 공개키를 찾지 못했습니다")
 
-        # 3) 자격증명을 RSA로 봉인해 전송 → E3/E4/S2/CLTID 수령
+        # 자격증명을 암호화해 인증 결과를 받는다.
         e2 = rsa_pkcs1v15_encrypt_hex(
             key.group(1),
             key.group(2),
@@ -359,7 +328,7 @@ class LearnUsClient:
                 + ". 반복 시도하면 계정이 잠기니 자격증명을 먼저 확인하세요."
             )
 
-        # 4~5) LearnUs에 인증 결과를 넘겨 MoodleSession을 로그인 상태로 승격
+        # 인증 결과를 LearnUs에 넘겨 MoodleSession을 만든다.
         self.request(
             f"{LEARNUS}/passni/sso/spLoginData.php",
             data={
@@ -377,14 +346,10 @@ class LearnUsClient:
         )
         self.request(f"{LEARNUS}/passni/spLoginProcess.php", referer=LEARNUS)
 
-    # ---- 세션 상태 ----
-
     def session_info(self) -> tuple[bool, str | None]:
-        """(로그인 여부, sesskey). yontil과 동일하게 logout.php 존재로 판정한다.
+        """(로그인 여부, sesskey)를 반환한다.
 
-        주의: HTTP 오류를 '로그아웃'으로 오해하면 안 된다. LearnUs는 요청이 몰리면
-        400을 잠깐 돌려주는데, 그걸 세션 만료로 단정해 아카이빙을 통째로 중단시킨
-        전례가 있다. 판정이 불가능하면 예외를 던져 호출자가 구분하게 한다.
+        HTTP 오류는 세션 만료로 간주하지 않고 그대로 호출자에게 올린다.
         """
         html, _ = self.fetch(LEARNUS)
         alive = "/login/logout.php" in html

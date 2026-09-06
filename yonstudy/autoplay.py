@@ -1,31 +1,7 @@
-"""자동수강 — 열람기간이 열린 미시청 영상을 실제로 재생해 진도를 채운다.
+"""수강 기간이 열린 VOD를 Playwright로 재생한다.
 
-## 진도가 어떻게 기록되는지 (mod_vod/vod AMD 모듈 실측, 2026-08-02)
-
-    k.on("timeupdate", function(){
-        ...
-        if (1 != k.paused() && l.current >= l.max) l.max = Math.floor(l.current);
-    })
-    c.ajax = function(state, from, to){
-        if (c.isProgress && c.cmid>0 && c.isLogin && c.isProgressPeriodCheck) {
-            $.post("/mod/vod/action.php", {type:"vod_log", track, attempt, state, positionfrom, positionto, logtime})
-        }
-    }
-
-즉 진도는 **`video.currentTime`의 최댓값(`l.max`)** 하나로 결정된다. 서버로 올라가는
-페이로드에도 경과 실시간(wall clock)이 들어가지 않는다. 따라서 **2배속으로 봐도
-진도는 100% 그대로 인정된다** — A/B 파일럿 없이 코드로 확정된 사실이다.
-
-제약도 같은 코드에서 확인했다:
-  * `isProgressPeriodCheck`(progress_period)가 false면 `ajax()` 자체가 no-op —
-    진도처리기간이 아니면 아무리 재생해도 기록되지 않는다.
-  * 배속 상한은 `rate_max`. 초과하면 플레이어가 강제로 되돌리고 경고를 띄운다.
-  * state 코드: 1=진입, 3=재생, 2=일시정지/이동, 10=종료, 99=창 닫기.
-
-## 이 모듈이 하지 않는 것
-
-`/mod/vod/action.php`를 직접 호출해 진도를 만들어내지 않는다. 실제 재생만 한다.
-로그 위조는 기록 조작이고, 이 도구의 범위 밖이다.
+서버의 진도 API를 직접 호출하지 않는다. 뷰어가 허용한 배속으로 실제 재생하고,
+완주 후 출석부를 다시 읽어 반영 여부를 확인한다.
 """
 
 from __future__ import annotations
@@ -212,15 +188,13 @@ def upcoming(store, now: datetime | None = None, days: int = 14) -> list[dict]:
     return out
 
 
-# --------------------------------------------------------------------------
-# 재생 워커
-# --------------------------------------------------------------------------
+# 브라우저 재생
 
 PLAYWRIGHT_HELP = """\
 Playwright가 필요합니다:
 
-    /root/yonstudy/.venv/bin/pip install playwright
-    /root/yonstudy/.venv/bin/playwright install chromium
+    python -m pip install playwright
+    python -m playwright install chromium
 
 설치 뒤 `video.canPlayType()`으로 H.264/AAC 지원을 확인하세요. 다른 시스템 Chrome을
 쓰려면 YONSTUDY_BROWSER_CHANNEL=chrome을 설정할 수 있습니다.

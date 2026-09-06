@@ -1,8 +1,4 @@
-"""LearnUs(Moodle + coursemos) HTML 파서.
-
-모든 셀렉터는 2026-08-02에 실제 응답을 받아 확인한 구조를 기준으로 한다.
-DOM이 바뀌면 여기만 고치면 되도록 파싱을 한 곳에 모았다.
-"""
+"""LearnUs와 coursemos의 HTML 응답을 데이터 객체로 바꾼다."""
 
 from __future__ import annotations
 
@@ -29,9 +25,7 @@ def _cells(row: str) -> list[str]:
     return [text(c) for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
 
 
-# --------------------------------------------------------------------------
-# 강좌 목록  /local/ubion/user/index.php?year=all&semester=all
-# --------------------------------------------------------------------------
+# 강좌 목록: /local/ubion/user/index.php
 
 
 @dataclass
@@ -101,37 +95,31 @@ def parse_semester_options(page: str) -> dict[str, list[str]]:
     return out
 
 
-# --------------------------------------------------------------------------
-# 강좌 페이지  /course/view.php?id=…
-# --------------------------------------------------------------------------
+# 강좌 페이지: /course/view.php
 
 
-# 49개 강좌 전수 조사(2026-08-02)에서 실제로 등장한 활동 모듈.
-# 개수는 조사 시점 총계 — 파서를 손볼 때 어디가 중요한지 가늠용.
+# 실제 강좌에서 확인한 활동 모듈.
 KNOWN_MODULES = {
-    "vod": "동영상 강의 (697)",
-    "ubfile": "자료 파일 (551)",
-    "assign": "과제 (229)",
-    "ubboard": "게시판 (194)",
-    "label": "설명 텍스트 (82)",
-    "quiz": "퀴즈/시험 (81)",
-    "feedback": "설문형 출석 (74)",
-    "folder": "폴더 자료 (59)",
-    "zoom": "실시간 화상강의 (45)",
-    "url": "외부 링크 (40)",
-    "turnitintooltwo": "Turnitin 표절검사 제출 (26)",
-    "resource": "표준 자료 (26)",
-    "forum": "포럼 (11)",
-    "vpl": "코딩 과제 Virtual Programming Lab (8)",
-    "lti": "외부 도구 연동 (2)",
-    "choice": "선택형 설문 (2)",
+    "vod": "동영상 강의",
+    "ubfile": "자료 파일",
+    "assign": "과제",
+    "ubboard": "게시판",
+    "label": "설명 텍스트",
+    "quiz": "퀴즈/시험",
+    "feedback": "설문형 출석",
+    "folder": "폴더 자료",
+    "zoom": "실시간 화상강의",
+    "url": "외부 링크",
+    "turnitintooltwo": "Turnitin 표절검사 제출",
+    "resource": "표준 자료",
+    "forum": "포럼",
+    "vpl": "코딩 과제 Virtual Programming Lab",
+    "lti": "외부 도구 연동",
+    "choice": "선택형 설문",
 }
 
-# 제출물이 발생하는 = "내가 한 활동"으로 아카이빙해야 하는 모듈.
-# forum은 여기 넣지 않는다 — "제출" 개념이 없어 전부 미제출로 잡히기 때문이다.
-# 대신 강좌 단위로 /mod/forum/user.php 에서 내가 쓴 글을 모은다 (parse_forum_posts).
+# forum은 제출 상태가 없어 제출형 활동에서 뺀다.
 SUBMISSION_MODULES = {"assign", "turnitintooltwo", "vpl", "quiz", "feedback", "choice"}
-# 자료 파일이 붙는 모듈
 RESOURCE_MODULES = {"ubfile", "folder", "resource"}
 
 
@@ -188,14 +176,7 @@ _ACCESSHIDE = re.compile(r'<span class="accesshide[^"]*"[^>]*>.*?</span>', re.S)
 
 
 def _instance_name(blob: str) -> str:
-    """활동 제목.
-
-    두 가지 변종을 모두 처리해야 한다 (49개 강좌 전수 확인):
-      * vod  : 제목 뒤에 <span class="accesshide"> VOD</span>가 붙는다
-      * assign 등 : accesshide 없이 제목만
-      * 제한됨(dimmed) 활동 : <a> 자체가 없고 <div class="dimmed">로 감싸진다
-    accesshide를 먼저 걷어낸 뒤 instancename의 닫는 </span>까지 취하면 셋 다 잡힌다.
-    """
+    """accesshide 라벨을 제외한 활동 제목을 반환한다."""
     m = re.search(r'class="instancename">(.*?)</span>', _ACCESSHIDE.sub("", blob), re.S)
     return text(m.group(1)) if m else ""
 
@@ -337,9 +318,7 @@ def parse_course_page(page: str) -> tuple[list[Activity], dict]:
     return activities, meta
 
 
-# --------------------------------------------------------------------------
-# VOD 뷰어  /mod/vod/viewer.php?id=…
-# --------------------------------------------------------------------------
+# VOD 뷰어: /mod/vod/viewer.php
 
 # mod_vod/vod AMD 모듈의 progress() 시그니처 (d..C, 26개) 순서.
 # 실제 번들에서 확인: c.progress=function(d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,A,B,C)
@@ -349,22 +328,22 @@ _PROGRESS_PARAMS = [
     "f_flag",          # f  0이면 이어보기/이동제한 분기 활성
     "g_ts",            # g
     "h_num",           # h
-    "progress_period", # i  ★ 진도처리기간 여부. False면 ajax() 자체가 no-op
+    "progress_period", # i  진도처리기간 여부
     "courseid",        # j
     "cmid",            # k
     "trackid",         # l
     "attempt",         # m
-    "max_position",    # n  ★ 지금까지의 최대 시청 위치(초)
+    "max_position",    # n  지금까지의 최대 시청 위치(초)
     "resume",          # o
     "interval_ms",     # p  주기 로그 간격
     "hls",             # q
-    "swf_url",         # r  ★ falsy일 때만 seek 제한 코드가 설치됨
-    "rate_allowed",    # s  ★ 배속 허용
+    "swf_url",         # r  falsy일 때 seek 제한
+    "rate_allowed",    # s  배속 허용
     "youtube",         # t
     "before_progress", # u
-    "rate_max",        # v  ★ 최대 허용 배속
+    "rate_max",        # v  최대 허용 배속
     "quality_selector",# w
-    "checker_url",     # x  ★ 외부 learningChecker 모듈 경로
+    "checker_url",     # x  외부 learningChecker 모듈 경로
     "checker_token",   # y
     "logtime",         # z
     "skip_offset",     # A
@@ -416,12 +395,9 @@ def _js_args(raw: str) -> list:
 
 
 def parse_vod_viewer(page: str, cmid: int) -> VodViewer:
-    """뷰어 페이지 → 재생/진도 정보.
+    """뷰어의 재생과 진도 정보를 읽는다.
 
-    실측: 697편 중 94편은 재생 정보가 아예 없다. 원인이 둘로 갈린다.
-      * 153바이트짜리 빈 페이지 — 콘텐츠가 삭제된 과거 강좌 (주로 2022년)
-      * 강좌 페이지로 되돌려 보냄 — 열람기간이 끝났거나 제한된 영상
-    둘 다 파서 문제가 아니므로 status로 구분해 기록한다.
+    빈 페이지와 강좌 페이지 리다이렉트는 각각 empty와 no_access로 구분한다.
     """
     v = VodViewer(cmid=cmid)
     if len(page) < 500:
@@ -468,9 +444,7 @@ def parse_vod_viewer(page: str, cmid: int) -> VodViewer:
     return v
 
 
-# --------------------------------------------------------------------------
-# 진도 리포트  /report/ubcompletion/user_progress.php?id=…
-# --------------------------------------------------------------------------
+# 진도 리포트: /report/ubcompletion/user_progress.php
 
 
 @dataclass
@@ -542,9 +516,7 @@ def parse_progress_report(page: str) -> tuple[dict, list[ProgressRow]]:
     return info, rows
 
 
-# --------------------------------------------------------------------------
-# 과제  /mod/assign/view.php?id=…
-# --------------------------------------------------------------------------
+# 제출형 활동: /mod/assign/view.php 등
 
 
 @dataclass
@@ -587,13 +559,8 @@ _PLUGINFILE = re.compile(r'href="(https://ys\.learnus\.org/pluginfile\.php/[^"]+
 def parse_submission(page: str, cmid: int, modname: str = "assign") -> AssignDetail:
     """제출형 활동 상세.
 
-    모듈마다 화면이 다르다 (49개 강좌 전수 조사 기준):
-      * assign          — generaltable에 Submission status / Due date / Grade
-      * turnitintooltwo — 자체 제출 테이블, pluginfile 대신 자체 다운로드 링크
-      * vpl             — 코드 제출, 상태가 표가 아니라 문장으로 나옴
-      * quiz            — 응시 이력 표(Attempt / Marks)
-      * feedback        — 응답 완료 여부만
-    공통 골격(정의 테이블 + pluginfile 링크)을 먼저 훑고, 모듈별 신호를 덧댄다.
+    공통 테이블과 pluginfile 링크를 먼저 읽고 Turnitin, VPL, quiz, feedback의
+    모듈별 상태를 추가로 확인한다.
     """
     d = AssignDetail(cmid=cmid, modname=modname)
 
@@ -638,12 +605,7 @@ _TII_GRADE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+)")
 
 
 def _parse_turnitin(page: str, d: AssignDetail) -> None:
-    """Turnitin 제출 테이블.
-
-    컬럼이 숨김열 때문에 헤더와 위치가 어긋나므로, 위치 대신 값의 모양으로 찾는다.
-    실측 행: [part, '', 이름, 학번, 제목, 제목+URL, 보고서ID, …, '2026/04/26 22:45', '93',
-              '93 /100 …', '보고서 제출', '', '--']
-    """
+    """숨김 열이 있는 Turnitin 표를 값의 형식으로 읽는다."""
     for tbl in re.findall(r"<table[^>]*>.*?</table>", page, re.S):
         for row in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.S):
             flat = " ".join(_cells(row))
@@ -692,9 +654,7 @@ def _parse_vpl(page: str, d: AssignDetail) -> None:
         d.fields.setdefault("Grade", f"{grade.group(1)}/{grade.group(2)}")
 
 
-# --------------------------------------------------------------------------
-# 게시판  mod/ubboard  (공지사항 / Q&A / 자료 게시판)
-# --------------------------------------------------------------------------
+# 게시판: mod/ubboard
 
 
 @dataclass
@@ -788,9 +748,7 @@ def parse_ubboard_article(page: str, post: Post) -> Post:
     return post
 
 
-# --------------------------------------------------------------------------
-# 포럼  mod/forum
-# --------------------------------------------------------------------------
+# 포럼: mod/forum
 
 
 def parse_forum_discussions(page: str) -> list[tuple[str, str]]:
@@ -876,14 +834,12 @@ def find_user_id(page: str) -> str | None:
     return m.group(1) if m else None
 
 
-# 이전 이름 호환
+# 예전 이름으로 불러오는 코드를 위해 남겨 둔다.
 def parse_assign(page: str, cmid: int) -> AssignDetail:
     return parse_submission(page, cmid, "assign")
 
 
-# --------------------------------------------------------------------------
-# 첨부파일 (모든 페이지 공통)
-# --------------------------------------------------------------------------
+# 모든 페이지의 첨부파일
 
 
 def parse_pluginfiles(page: str) -> list[tuple[str, str]]:

@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""yonstudy — LearnUs 아카이버 + 강의 학습 도우미.
-
-    python3 cli.py login                  연세 SSO 로그인 (쿠키 저장)
-    python3 cli.py courses                내 강좌 전체 목록
-    python3 cli.py archive [--year 2026]  강좌 순회 아카이빙 (영상 본체 제외)
-    python3 cli.py status                 아카이브 현황
-    python3 cli.py plan                   자동수강 대상/우선순위 계산
-    python3 cli.py watch                  진도 선완성 실행 (실제 재생)
-    python3 cli.py report [--sync]        이번 학기 진도/제출 + 오늘 업데이트 리포트
-    python3 cli.py download [--video]     오디오 + 슬라이드 프레임 (+영상 원본) 다운로드
-    python3 cli.py analyze --cmid N       슬라이드 ↔ 자막 정렬 분석
-"""
+"""LearnUs 자료와 학습 현황을 정리하는 명령행 도구."""
 
 from __future__ import annotations
 
@@ -28,13 +17,24 @@ from yonstudy.archive import Archiver, SessionExpired  # noqa: E402
 from yonstudy.client import LearnUsClient  # noqa: E402
 from yonstudy.store import Store  # noqa: E402
 
-DEFAULT_COOKIES = os.environ.get("LEARNUS_COOKIES", "/root/ys.learnus.org_cookies.txt")
-DEFAULT_STORE = os.environ.get("YONSTUDY_STORE", "/root/yonstudy/store")
+PROJECT_ROOT = Path(__file__).resolve().parent
+_LEGACY_COOKIES = Path("/root/ys.learnus.org_cookies.txt")
+DEFAULT_COOKIES = os.environ.get(
+    "LEARNUS_COOKIES",
+    str(
+        _LEGACY_COOKIES
+        if _LEGACY_COOKIES.exists()
+        else PROJECT_ROOT / "store/learnus-cookies.txt"
+    ),
+)
+DEFAULT_STORE = os.environ.get("YONSTUDY_STORE", str(PROJECT_ROOT / "store"))
 DEFAULT_EXPORT = os.environ.get(
-    "YONSTUDY_ONEDRIVE_LOCAL", "/root/yonstudy/exports/OneDrive"
+    "YONSTUDY_EXPORT_DIR",
+    os.environ.get("YONSTUDY_ONEDRIVE_LOCAL", str(PROJECT_ROOT / "exports/archive")),
 )
 DEFAULT_REMOTE = os.environ.get(
-    "YONSTUDY_ONEDRIVE_REMOTE", "yonstudy-onedrive:yonstudy"
+    "YONSTUDY_REMOTE",
+    os.environ.get("YONSTUDY_ONEDRIVE_REMOTE", "yonstudy-onedrive:yonstudy"),
 )
 
 
@@ -51,9 +51,6 @@ def get_client(args) -> LearnUsClient:
     if status.relogged:
         print("LearnUs 세션 만료 감지 · 자동 재로그인 성공")
     return c
-
-
-# ---------------------------------------------------------------- commands
 
 
 def cmd_login(args) -> int:
@@ -353,13 +350,13 @@ def cmd_report(args) -> int:
     return 0
 
 
-def cmd_export_onedrive(args) -> int:
+def cmd_export(args) -> int:
     from yonstudy.daily import SEOUL, current_term
-    from yonstudy.export import export_onedrive_tree
+    from yonstudy.export import export_tree
 
     today = datetime.now(SEOUL).date()
     default_year, default_semester = current_term(today)
-    result = export_onedrive_tree(
+    result = export_tree(
         Store(args.store),
         args.destination,
         year=args.year or default_year,
@@ -368,6 +365,63 @@ def cmd_export_onedrive(args) -> int:
     )
     print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
     return 0
+
+
+# 이전 CLI 함수를 가져다 쓰는 코드와의 호환용이다.
+cmd_export_onedrive = cmd_export
+
+
+def cmd_upload(args) -> int:
+    """이미 수집한 파일과 게시글을 rclone remote에 올린다."""
+    from yonstudy.daily import SEOUL, current_term
+    from yonstudy.remote import RcloneRemote, sync_remote_tree
+
+    default_year, default_semester = current_term(datetime.now(SEOUL).date())
+    year = args.year or default_year
+    semester = args.semester or default_semester
+    store = Store(args.store)
+    if args.dry_run:
+        counts = {
+            row["role"]: row["count"]
+            for row in store.query(
+                """
+                SELECT f.role,COUNT(*) AS count
+                  FROM file f JOIN course c ON c.course_id=f.course_id
+                 WHERE c.year=? AND c.semester=?
+                   AND f.role IN ('resource','post','submission','introattachment')
+                 GROUP BY f.role
+                """,
+                (year, semester),
+            )
+        }
+        post_count = store.query(
+            """
+            SELECT COUNT(*) AS count
+              FROM post p JOIN course c ON c.course_id=p.course_id
+             WHERE c.year=? AND c.semester=?
+               AND NOT (
+                   p.modname='forum'
+                   AND p.post_id LIKE 't%'
+                   AND p.body IS NULL
+               )
+            """,
+            (year, semester),
+        )[0]["count"]
+        print(json.dumps({
+            "mode": "dry-run",
+            "remote": args.remote,
+            "year": year,
+            "semester": semester,
+            "files": counts,
+            "posts": post_count,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    result = sync_remote_tree(
+        store, RcloneRemote(args.remote), year=year, semester=semester
+    )
+    print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
+    return 1 if result.missing_sources else 0
 
 
 def cmd_automate(args) -> int:
@@ -381,7 +435,7 @@ def cmd_automate(args) -> int:
         sync=not args.no_sync,
         dry_run=args.dry_run,
         send_mail=not args.no_mail,
-        export_onedrive=not args.no_onedrive,
+        upload_remote=not args.no_upload,
     )
     print(json.dumps(state, ensure_ascii=False, indent=2))
     return code
@@ -509,10 +563,10 @@ def cmd_monitor(args) -> int:
 
 
 def cmd_archive_only(args) -> int:
-    """진도 비추적 VOD를 재생 없이 OneDrive에 원본 보관한다."""
+    """진도 비추적 VOD를 재생 없이 remote에 보관한다."""
     from dataclasses import asdict
     from yonstudy.daily import SEOUL, current_term
-    from yonstudy.onedrive import RcloneOneDrive
+    from yonstudy.remote import RcloneRemote
     from yonstudy.video_archive import archive_untracked_vods
 
     now = datetime.now(SEOUL)
@@ -535,7 +589,7 @@ def cmd_archive_only(args) -> int:
             )
         store.commit()
 
-    sink = RcloneOneDrive(args.remote)
+    sink = RcloneRemote(args.remote)
     result = archive_untracked_vods(
         store, sink, year=year, semester=semester,
         course_ids=course_ids, limit=args.limit,
@@ -601,22 +655,33 @@ def main() -> int:
     rep.add_argument("--json", action="store_true")
     rep.set_defaults(fn=cmd_report)
 
-    exp = sub.add_parser("export-onedrive", help="강의자료·Q&A를 OneDrive용 폴더로 내보내기")
+    exp = sub.add_parser(
+        "export", aliases=["export-onedrive"],
+        help="강의자료·게시글을 로컬 폴더로 내보내기",
+    )
     exp.add_argument("--destination", default=DEFAULT_EXPORT)
     exp.add_argument("--year")
     exp.add_argument("--semester")
     exp.add_argument("--dry-run", action="store_true")
-    exp.set_defaults(fn=cmd_export_onedrive)
+    exp.set_defaults(fn=cmd_export)
 
-    auto = sub.add_parser("automate", help="동기화·OneDrive 복사·메일 리포트 일괄 실행")
+    upload = sub.add_parser("upload", help="수집한 자료를 rclone remote에 업로드")
+    upload.add_argument("--remote", default=DEFAULT_REMOTE)
+    upload.add_argument("--year")
+    upload.add_argument("--semester")
+    upload.add_argument("--dry-run", action="store_true")
+    upload.set_defaults(fn=cmd_upload)
+
+    auto = sub.add_parser("automate", help="동기화·원격 백업·메일 리포트 일괄 실행")
     auto.add_argument("--destination", default=DEFAULT_EXPORT)
     auto.add_argument("--remote", default=DEFAULT_REMOTE)
     auto.add_argument("--no-sync", action="store_true")
     auto.add_argument("--no-mail", action="store_true")
     auto.add_argument(
-        "--no-onedrive",
+        "--no-upload", "--no-onedrive",
+        dest="no_upload",
         action="store_true",
-        help="OneDrive용 로컬 내보내기와 rclone 업로드를 모두 생략",
+        help="rclone remote 업로드를 생략",
     )
     auto.add_argument("--dry-run", action="store_true")
     auto.set_defaults(fn=cmd_automate)
@@ -659,7 +724,7 @@ def main() -> int:
     monitor.set_defaults(fn=cmd_monitor)
 
     archive_only = sub.add_parser(
-        "archive-only", help="진도 비추적 VOD를 재생 없이 OneDrive에 원본 보관",
+        "archive-only", help="진도 비추적 VOD를 재생 없이 remote에 원본 보관",
     )
     archive_only.add_argument("--course", nargs="*", type=int)
     archive_only.add_argument("--limit", type=int)

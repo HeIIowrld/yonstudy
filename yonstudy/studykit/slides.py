@@ -1,7 +1,6 @@
-"""강의안 PDF에서 슬라이드 텍스트를 뽑는다.
+"""강의안 PDF에서 페이지별 텍스트를 뽑는다.
 
-pypdf가 있으면 그것을 쓰고, 없으면 PDF 콘텐츠 스트림을 직접 풀어 텍스트를 긁는
-폴백을 쓴다 (설치 없이도 최소한 동작하게).
+pypdf가 없으면 콘텐츠 스트림을 직접 읽는 간단한 폴백을 쓴다.
 """
 
 from __future__ import annotations
@@ -50,10 +49,8 @@ def _extract_pages_fallback(path: Path) -> list[str]:
 def slide_candidates(store, cmid: int, limit: int = 12) -> list[tuple[Path, str]]:
     """이 강의의 강의안일 수 있는 PDF 후보들.
 
-    제목이 정확히 일치하는 자료를 최우선으로, 그 다음 같은 주차, 그 다음 같은 강좌 순.
-    실제 강좌를 돌려 보니 제목 규칙이 강좌마다 달라서(예: VOD는 '2주차 1차시 온라인 강의',
-    PDF는 'Lecture 3-MRP.pdf') **위치만으로 고르면 엉뚱한 장을 집는다.**
-    그래서 여기서는 후보만 넓게 주고, 실제 선택은 전사 내용과 대조해 결정한다.
+    제목 일치, 같은 주차, 같은 강좌 순으로 후보를 넓혀 간다. 실제 선택은 전사
+    내용과의 일치도로 정한다.
     """
     row = store.query(
         "SELECT title, course_id, section_idx FROM activity WHERE cmid=?", (cmid,)
@@ -85,14 +82,7 @@ def slide_candidates(store, cmid: int, limit: int = 12) -> list[tuple[Path, str]
 
 
 def find_slides_for(store, cmid: int) -> tuple[Path, str] | None:
-    """VOD와 같은 제목의 자료(ubfile) PDF를 찾는다.
-
-    실측: 강의안 ubfile의 제목이 VOD 제목과 정확히 같은 강좌가 많아
-    (예: 'Lecture 1-1: Logistics' ↔ 같은 이름의 PDF) 제목 매칭이 가장 확실하다.
-    실패하면 같은 섹션(주차)의 PDF 중 하나를 고른다.
-
-    반환값은 (blob 경로, 원본 파일명). blob은 sha256 이름이라 표시용 이름이 따로 필요하다.
-    """
+    """같은 제목, 같은 주차 순으로 PDF를 찾고 (blob 경로, 원본명)을 반환한다."""
     row = store.query(
         "SELECT title, course_id, section_idx FROM activity WHERE cmid=?", (cmid,)
     )

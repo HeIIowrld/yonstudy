@@ -1,10 +1,4 @@
-"""아카이버 — 강좌를 순회하며 활동/진도/과제/자막을 수집한다.
-
-원칙:
-  * 읽기 전용. 글쓰기·제출·설정 변경 요청은 이 모듈에 없다.
-  * 증분. 이미 받은 파일(url+role)은 건너뛴다.
-  * 영상 본체는 기본적으로 받지 않는다 (`--with-video`로만 활성).
-"""
+"""강좌를 순회하며 활동, 진도, 제출, 자막을 증분 수집한다."""
 
 from __future__ import annotations
 
@@ -51,9 +45,7 @@ class Archiver:
         if self.verbose:
             print(*a, flush=True)
 
-    # ------------------------------------------------------------------
     # 강좌 목록
-    # ------------------------------------------------------------------
 
     def sync_courses(self) -> list[P.Course]:
         page = self.c.request(
@@ -70,9 +62,7 @@ class Archiver:
         self.say(f"강좌 {len(courses)}개 동기화")
         return courses
 
-    # ------------------------------------------------------------------
-    # 강좌 1개
-    # ------------------------------------------------------------------
+    # 강좌 상세
 
     def sync_course(
         self,
@@ -102,7 +92,7 @@ class Archiver:
             counts[a.modname] = counts.get(a.modname, 0) + 1
         self.say("  활동: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
 
-        # 진도 리포트 — 동영상별 시청시간의 단일 진실 소스
+        # 시청 시간은 강좌 페이지가 아니라 진도 리포트를 기준으로 한다.
         progress_by_title: dict[str, P.ProgressRow] = {}
         try:
             rep = self.c.request(
@@ -117,27 +107,27 @@ class Archiver:
         except Exception as exc:  # 진도 리포트가 없는 강좌도 있다
             self.s.log("progress", str(course.course_id), False, str(exc))
 
-        # 동영상: 뷰어를 열어 HLS/자막/배속정책/진도기간을 확인 (본체는 받지 않음)
+        # 뷰어에서 HLS, 자막, 배속, 진도 기간만 확인한다.
         vods = [a for a in activities if a.modname == "vod"]
         for a in vods:
             self._sync_vod(course, a, progress_by_title, cdir, probe_vod, fetch_subtitles)
 
-        # 제출형 활동 — assign 뿐 아니라 turnitin/vpl/quiz/feedback/choice/forum 전부
+        # 과제 모듈마다 페이지가 달라 공통 파서로 정규화한다.
         for a in (x for x in activities if x.is_submission and not x.restricted):
             self._sync_submission(course, a, cdir, fetch_files)
 
-        # 게시판(공지·Q&A)과 포럼 — 강의 내용의 상당 부분이 여기 있다.
+        # 공지와 Q&A는 ubboard와 forum 모두에 올라온다.
         if fetch_boards:
             for a in (x for x in activities if x.modname == "ubboard" and not x.restricted):
                 self._sync_board(course, a, cdir, board_pages, fetch_files)
             for a in (x for x in activities if x.modname == "forum" and not x.restricted):
                 self._sync_forum(course, a, cdir, fetch_files)
 
-        # 포럼은 "제출" 개념이 없다. 강좌 단위로 내가 쓴 글도 따로 모아 둔다.
+        # 포럼의 내 글은 강좌 단위 페이지에서 따로 받는다.
         if any(x.modname == "forum" for x in activities):
             self._sync_forum_posts(course, cdir)
 
-        # 자료 — ubfile / folder / resource
+        # ubfile, folder, resource에 붙은 자료
         if fetch_files:
             for a in (x for x in activities if x.modname in P.RESOURCE_MODULES and not x.restricted):
                 self._sync_resource(course, a, cdir)
@@ -153,18 +143,8 @@ class Archiver:
         )
         return counts
 
-    # ------------------------------------------------------------------
-
     def _fetch_course_page(self, course, tries: int = 4) -> str:
-        """강좌 페이지를 받되, 세션 만료와 일시적 차단을 구분한다.
-
-        실측으로 배운 것 두 가지:
-          * `logout.php` 문자열이 없다고 세션 만료가 아니다. 응답이 이상하기만 해도
-            그렇게 보이므로, 멀쩡한 세션에서 44개 강좌가 연속 실패한 적이 있다.
-          * LearnUs는 요청이 몰리면 **HTTP 400을 잠깐 돌려준다.** 이건 레이트 리밋이지
-            세션 만료가 아니다. 실제로 400을 만난 두 강좌 모두 잠시 뒤 정상 로드됐다.
-        그래서 로그인 리다이렉트만 만료로 보고, 나머지는 넉넉히 쉬었다 다시 시도한다.
-        """
+        """로그인 리다이렉트는 세션 만료로, 나머지 이상 응답은 재시도 대상으로 본다."""
         delay = 20.0
         last = ""
         for attempt in range(1, tries + 1):
@@ -431,8 +411,8 @@ class Archiver:
     def _sync_resource(self, course, a, cdir) -> None:
         """mod/ubfile 등 자료 활동.
 
-        ubfile/resource의 view.php는 HTML을 주지 않고 pluginfile로 **바로 리다이렉트**한다
-        (실측 확인). 따라서 먼저 바이트로 받아 보고, HTML이면 그때 링크를 파싱한다.
+        view.php가 pluginfile로 바로 이동할 수 있어 먼저 바이트로 받고, HTML인
+        경우에만 본문에서 파일 링크를 찾는다.
         """
         # 이미 받아둔 자료면 네트워크를 아예 건드리지 않는다.
         existing = self.s.file_record(a.url, "resource")
@@ -471,6 +451,8 @@ class Archiver:
         if not existing:
             return False
         if self.file_sink is None:
+            if existing["remote_status"] in {"error", "missing"}:
+                return False
             return bool(existing["sha256"] or (existing["bytes"] or 0) > MAX_INLINE_FILE)
         desired = self.file_sink.file_path(
             year=course.year, semester=course.semester,
@@ -520,7 +502,7 @@ class Archiver:
                 self.s.update_file_remote(url, role, relative, "error")
                 raise
             self.s.update_file_remote(url, role, relative, "ok")
-            action = "OneDrive 저장" if uploaded else "OneDrive에 이미 있음"
+            action = "remote 저장" if uploaded else "remote에 이미 있음"
             self.say(f"      {action} {safe} ({size//1024}KB)")
             return
         if len(body) > MAX_INLINE_FILE:

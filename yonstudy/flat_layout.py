@@ -1,8 +1,4 @@
-"""실행과 분리된 평면형 개인 아카이브 경로 계획.
-
-이 모듈은 파일을 복사하거나 VOD를 다운로드하지 않는다. DB에 이미 수집된 메타데이터로
-향후 산출물의 이름만 계산해 OneDrive가 안정화되기 전에 구조를 검토할 수 있게 한다.
-"""
+"""DB 메타데이터로 평면형 아카이브 경로를 계산한다."""
 
 from __future__ import annotations
 
@@ -62,7 +58,7 @@ def canonical_filename(
     stable_id: str,
     extension: str = "",
 ) -> str:
-    """Windows/OneDrive에서도 정렬 가능하고 충돌하지 않는 단일 파일명을 만든다."""
+    """Windows에서도 정렬되고 이름이 겹치지 않는 파일명을 만든다."""
     suffix = re.sub(r"[^A-Za-z0-9]", "", extension.lstrip("."))[:15]
     ext = f".{suffix}" if suffix else ""
     head = f"W{week:02d}-L{lesson:02d}__{_clean(kind)}__"
