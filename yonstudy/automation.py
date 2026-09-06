@@ -1,11 +1,10 @@
-"""일일 동기화 → 로컬 내보내기 → OneDrive 업로드 → 메일 리포트."""
+"""일일 동기화 → OneDrive 직접 저장 → 메일 리포트."""
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -16,50 +15,9 @@ from .daily import (
     SEOUL, build_daily_report, current_term, render_email_text,
     render_report, render_report_html, send_report,
 )
-from .export import export_onedrive_tree
+from .onedrive import RcloneOneDrive, sync_onedrive_tree
 from .store import Store
-
-
-def _upload_with_rclone(source: Path, remote: str, dry_run: bool = False) -> dict:
-    exe = shutil.which("rclone")
-    if not exe:
-        return {"status": "not_installed", "remote": remote}
-    remote_name = remote.split(":", 1)[0] + ":"
-    try:
-        listed = subprocess.run(
-            [exe, "listremotes"], capture_output=True, text=True, timeout=30, check=False
-        )
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "remote": remote, "output": "rclone listremotes timeout"}
-    remotes = set(listed.stdout.splitlines()) if listed.returncode == 0 else set()
-    if remote_name not in remotes:
-        return {"status": "not_configured", "remote": remote}
-
-    cmd = [
-        exe,
-        "copy",
-        str(source),
-        remote,
-        "--create-empty-src-dirs",
-        "--fast-list",
-        "--checkers=8",
-        "--transfers=4",
-        "--stats-one-line",
-    ]
-    if dry_run:
-        cmd.append("--dry-run")
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=6 * 3600, check=False
-        )
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "remote": remote, "output": "rclone copy timeout"}
-    return {
-        "status": "ok" if proc.returncode == 0 else "error",
-        "remote": remote,
-        "returncode": proc.returncode,
-        "output": (proc.stdout + "\n" + proc.stderr).strip()[-4000:],
-    }
+from .video_archive import archive_untracked_vods
 
 
 def run_daily_automation(
@@ -84,9 +42,19 @@ def run_daily_automation(
         "sync": {"status": "skipped"},
         "export": {},
         "onedrive": {},
+        "video_archive": {"status": "skipped"},
         "mail": {"status": "skipped"},
     }
     exit_code = 0
+    sink = None
+    client = None
+    sink_error = None
+    if export_onedrive and not dry_run:
+        try:
+            sink = RcloneOneDrive(remote)
+        except Exception as exc:
+            sink_error = str(exc)
+            exit_code = 1
 
     if sync and not dry_run:
         try:
@@ -94,7 +62,7 @@ def run_daily_automation(
             auth = ensure_session(
                 client, state_path=Path(store_path) / "auth_state.json"
             )
-            arc = Archiver(client, store)
+            arc = Archiver(client, store, file_sink=sink)
             courses = [
                 c for c in arc.sync_courses()
                 if c.year == year and c.semester == semester
@@ -106,7 +74,8 @@ def run_daily_automation(
                         course,
                         probe_vod=True,
                         fetch_subtitles=False,
-                        fetch_files=True,
+                        # OneDrive가 없으면 로컬로 대체 저장하지 않는다.
+                        fetch_files=sink is not None,
                         fetch_boards=True,
                         board_pages=3,
                     )
@@ -126,30 +95,56 @@ def run_daily_automation(
             exit_code = 1
 
     if export_onedrive:
-        exported = export_onedrive_tree(
-            store,
-            export_dir,
-            year=year,
-            semester=semester,
-            dry_run=dry_run,
-        )
-        state["export"] = dict(exported.__dict__)
-        state["onedrive"] = (
-            {"status": "dry_run", "remote": remote}
-            if dry_run
-            else _upload_with_rclone(Path(export_dir), remote)
-        )
-        if state["onedrive"]["status"] == "error":
-            exit_code = 1
+        state["export"] = {
+            "status": "not_used",
+            "mode": "direct-no-local-staging",
+            "legacy_destination": export_dir,
+        }
+        if dry_run:
+            state["onedrive"] = {"status": "dry_run", "remote": remote}
+        elif sink is None:
+            state["onedrive"] = {
+                "status": "error", "remote": remote,
+                "message": sink_error or "OneDrive 직접 저장을 초기화하지 못했습니다",
+            }
+        else:
+            try:
+                direct = sync_onedrive_tree(store, sink, year=year, semester=semester)
+                state["onedrive"] = {"status": "ok", **direct.__dict__}
+            except Exception as exc:
+                state["onedrive"] = {
+                    "status": "error", "remote": remote, "message": str(exc),
+                }
+                exit_code = 1
+            try:
+                archive_limit = max(
+                    1, int(os.environ.get("YONSTUDY_ARCHIVE_ONLY_LIMIT", "4"))
+                )
+                archived = archive_untracked_vods(
+                    store, sink, year=year, semester=semester,
+                    limit=archive_limit, client=client,
+                )
+                state["video_archive"] = {"status": "ok", **asdict(archived)}
+                if archived.failed_files:
+                    exit_code = 1
+            except Exception as exc:
+                state["video_archive"] = {
+                    "status": "error", "message": str(exc),
+                }
+                exit_code = 1
     else:
         state["export"] = {
             "status": "disabled",
-            "message": "OneDrive 안정화 전 로컬 내보내기 보류",
+            "message": "로컬 대체 저장 없이 파일 수집을 생략",
         }
         state["onedrive"] = {
             "status": "disabled",
             "remote": remote,
-            "message": "OneDrive 안정화 전 rclone 업로드 보류",
+            "message": "OneDrive 직접 저장 비활성화",
+        }
+        state["video_archive"] = {
+            "status": "disabled",
+            "message": "OneDrive 직접 저장 비활성화",
         }
 
     report = build_daily_report(store, target=target, year=year, semester=semester)
@@ -207,7 +202,7 @@ def run_scheduled_watch(
     limit: int = 1,
     dry_run: bool = False,
 ) -> tuple[int, dict]:
-    """현재 학기의 정상 수강기간 내 미완료 영상을 한 번에 소량 처리한다.
+    """현재 학기의 미완료 또는 완료 비추적 영상을 한 번에 소량 처리한다.
 
     systemd의 RandomizedDelaySec는 서버 부하와 DB 작업 충돌을 분산하는 용도다.
     여기서는 정상 마감(open_to)이 지난 영상은 지각기간이 남아 있어도 자동 재생하지
@@ -265,7 +260,9 @@ def run_scheduled_watch(
             state["error"] = str(exc)
             return finish(1, "sync_error")
 
-    plan = build_plan(store, course_ids=course_ids)
+    plan = build_plan(
+        store, course_ids=course_ids, include_untracked_once=True
+    )
     if not plan:
         return finish(0, "nothing_to_watch")
 
@@ -288,7 +285,13 @@ def run_scheduled_watch(
         except Exception as exc:
             state["error"] = str(exc)
             return finish(1, "refresh_error")
-        plan = build_plan(store, course_ids=course_ids)
+        plan = build_plan(
+            store, course_ids=course_ids, include_untracked_once=True
+        )
+
+    # 직전 후보가 갱신 결과 기간 밖으로 바뀌면 성공한 재생으로 기록하지 않는다.
+    if not plan:
+        return finish(0, "nothing_to_watch")
 
     selected = plan[: max(1, limit)]
     state["jobs"] = [
@@ -299,6 +302,7 @@ def run_scheduled_watch(
             "remaining_minutes": (job.remaining_sec + 59) // 60,
             "rate": job.rate,
             "normal_deadline": job.open_to,
+            "mode": "progress" if job.tracks_progress else "playback_once",
         }
         for job in selected
     ]
@@ -306,7 +310,15 @@ def run_scheduled_watch(
         run_plan(selected, cookie_path, dry_run=True)
         return finish(0, "dry_run")
 
-    code = run_plan(selected, cookie_path)
+    playback_results: dict[int, bool] = {}
+
+    def record_result(job, ok: bool, note: str) -> None:
+        playback_results[job.cmid] = ok
+        kind = "watch" if job.tracks_progress else "playback_once"
+        store.log(kind, str(job.cmid), ok, note)
+        store.commit()
+
+    code = run_plan(selected, cookie_path, on_result=record_result)
     if code != 0:
         return finish(code, "playback_error")
 
@@ -338,7 +350,20 @@ def run_scheduled_watch(
             (job.cmid,),
         )
         row = dict(rows[0]) if rows else {}
-        ok = bool((row.get("progress_pct") or 0) >= 100 or row.get("completion") == "y")
+        if job.tracks_progress:
+            ok = bool(
+                (row.get("progress_pct") or 0) >= 100
+                or row.get("completion") == "y"
+            )
+            verification_source = "learnus_progress"
+        else:
+            ok = bool(playback_results.get(job.cmid))
+            verification_source = "local_playback_once"
         verified = verified and ok
-        state["verification"].append({"cmid": job.cmid, "ok": ok, **row})
+        state["verification"].append({
+            "cmid": job.cmid,
+            "ok": ok,
+            "source": verification_source,
+            **row,
+        })
     return finish(0 if verified else 1, "verified" if verified else "verification_failed")

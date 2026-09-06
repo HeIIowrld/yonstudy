@@ -41,6 +41,7 @@ def lesson_number(title: str | None) -> int:
     value = title or ""
     patterns = (
         r"\bweek\s*\d{1,2}\s*[-_.]\s*(\d{1,2})\b",
+        r"\blecture\s*\d{1,2}\s*[-_.]\s*(\d{1,2})\b",
         r"\b\d{1,2}\s*주차\D{0,8}(\d{1,2})\s*차시\b",
         r"^\s*\d{1,2}\s*[-_]\s*(\d{1,2})\b",
         r"\blecture\s*0*(\d{1,2})\b",
@@ -68,6 +69,45 @@ def canonical_filename(
     tail = f"__{_clean(stable_id)}{ext}"
     budget = MAX_FILENAME_BYTES - len((head + tail).encode("utf-8"))
     middle = _truncate_utf8(_clean(title), budget) or "이름없음"
+    return f"{head}{middle}{tail}"
+
+
+def resource_filename(
+    *,
+    section_idx: int | None,
+    section_name: str | None,
+    activity_title: str | None,
+    name: str,
+    file_id: int,
+    open_from: str | None = None,
+    saved_at: str | None = None,
+) -> str:
+    """과목 루트에 둘 강의자료의 정렬 가능한 파일명을 만든다.
+
+    주차 정보가 있으면 ``W01-L02``를, 없으면 공개일/수집일 ``YYYYMMDD``를
+    접두어로 쓴다. 종류와 고정 ID도 남겨 다른 루트 파일과 이름이 겹치지 않는다.
+    """
+    original = Path(name or f"파일_{file_id}")
+    title_hint = " ".join(filter(None, (activity_title, original.stem)))
+    week = week_number(section_idx, section_name, title_hint)
+    lesson = lesson_number(title_hint)
+    if week:
+        return canonical_filename(
+            week=week,
+            lesson=lesson,
+            kind="강의자료",
+            title=original.stem,
+            stable_id=f"f{file_id}",
+            extension=original.suffix,
+        )
+
+    day = re.sub(r"\D", "", ((open_from or saved_at) or "")[:10]) or "날짜없음"
+    suffix = re.sub(r"[^A-Za-z0-9]", "", original.suffix.lstrip("."))[:15]
+    ext = f".{suffix}" if suffix else ""
+    head = f"{day}__강의자료__"
+    tail = f"__f{file_id}{ext}"
+    budget = MAX_FILENAME_BYTES - len((head + tail).encode("utf-8"))
+    middle = _truncate_utf8(_clean(original.stem), budget) or "이름없음"
     return f"{head}{middle}{tail}"
 
 
@@ -123,14 +163,21 @@ def build_flat_plan(store, *, destination: str | Path, year: str, semester: str)
             week = week_number(row["section_idx"], row["section_name"], row["activity_title"])
             lesson = lesson_number(row["activity_title"] or original.stem)
             kind = "강의자료" if row["role"] == "resource" else "게시판첨부"
-            name = canonical_filename(
-                week=week,
-                lesson=lesson,
-                kind=kind,
-                title=original.stem,
-                stable_id=f"f{row['id']}",
-                extension=original.suffix,
-            )
+            if row["role"] == "resource":
+                name = resource_filename(
+                    section_idx=row["section_idx"], section_name=row["section_name"],
+                    activity_title=row["activity_title"], name=str(original),
+                    file_id=row["id"],
+                )
+            else:
+                name = canonical_filename(
+                    week=week,
+                    lesson=lesson,
+                    kind=kind,
+                    title=original.stem,
+                    stable_id=f"f{row['id']}",
+                    extension=original.suffix,
+                )
             blob = store.blob_path(row["sha256"]) if row["sha256"] else None
             entries.append(
                 FlatEntry(

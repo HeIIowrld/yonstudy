@@ -34,6 +34,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 VIEWER = "https://ys.learnus.org/mod/vod/viewer.php?id={cmid}"
@@ -65,6 +66,7 @@ class Job:
     rate: float
     urgency: str
     deadline: datetime | None
+    tracks_progress: bool = True
 
     @property
     def remaining_sec(self) -> int:
@@ -86,13 +88,13 @@ def build_plan(
     max_rate_cap: float = 2.0,
     course_ids: set[int] | None = None,
     include_late: bool = False,
+    include_untracked_once: bool = False,
 ) -> list[Job]:
-    """진도를 채워야 하고, 지금 채울 수 있는 영상만 골라 우선순위대로 정렬한다.
+    """지금 재생해야 하는 영상을 골라 우선순위대로 정렬한다.
 
-    선정 조건 (모두 만족):
-      1. 진도 100% 미만
-      2. 지금이 진도처리기간 안 — 뷰어에서 읽은 progress_period가 참이거나,
-         강좌 페이지의 학습기간(지각기한 포함)이 현재를 포함
+    진도 추적 영상은 100% 미만이면서 현재 진도처리기간인 경우만 고른다.
+    ``include_untracked_once``를 켜면 진도율·완료 체크가 없는 영상도 공개 후 한 번
+    완주 대상으로 넣는다. 성공 기록은 ``crawl_log(kind='playback_once')``로 판정한다.
     """
     if now is None:
         now = datetime.now(SEOUL).replace(tzinfo=None)
@@ -108,9 +110,13 @@ def build_plan(
     rows = store.query(
         f"""
         SELECT v.cmid, v.course_id, v.duration_sec, v.watched_sec, v.progress_pct,
-               v.can_log_progress, v.max_rate,
+               v.can_log_progress, v.max_rate, v.is_progress, v.status,
                a.title, a.open_from, a.open_to, a.late_until,
-               c.name AS course_name
+               c.name AS course_name,
+               EXISTS(
+                   SELECT 1 FROM crawl_log l
+                    WHERE l.kind='playback_once' AND l.ref=CAST(v.cmid AS TEXT) AND l.ok=1
+               ) AS played_once
           FROM vod v
           JOIN activity a ON a.cmid = v.cmid
           JOIN course   c ON c.course_id = v.course_id
@@ -129,9 +135,21 @@ def build_plan(
         start = _dt(r["open_from"])
         end = _dt((r["late_until"] if include_late else None) or r["open_to"])
         in_calendar = (not start or start <= now) and (not end or now <= end)
+        tracks_progress = r["is_progress"] != 0
+        if not tracks_progress:
+            # 완료 신호가 없는 영상은 뷰어가 실제로 열리고, 아직 로컬 완주 기록이
+            # 없으며, 공개일이 지난 경우 한 번만 재생한다. 마감 표시는 없는 경우가 많다.
+            if (
+                not include_untracked_once
+                or r["status"] != "ok"
+                or bool(r["played_once"])
+                or (start is not None and start > now)
+            ):
+                continue
+            open_now = True
         # 뷰어의 판정과 화면의 정상 수강기간을 함께 만족해야 한다. 기간 표기가
         # 아예 없는 강좌만 뷰어 판정에 전적으로 의존한다. 기본값은 지각기간 제외다.
-        if r["can_log_progress"] is not None:
+        elif r["can_log_progress"] is not None:
             open_now = bool(r["can_log_progress"]) and in_calendar
         elif start and end:
             open_now = start <= now <= end
@@ -141,7 +159,9 @@ def build_plan(
             continue
 
         rate = min(float(r["max_rate"] or 1.0), max_rate_cap)
-        if end is None:
+        if not tracks_progress:
+            urgency, deadline = "1회 재생", None
+        elif end is None:
             urgency, deadline = "상시", None
         else:
             left = end - now
@@ -159,10 +179,11 @@ def build_plan(
                 open_from=r["open_from"], open_to=r["open_to"],
                 late_until=r["late_until"], rate=rate,
                 urgency=urgency, deadline=deadline,
+                tracks_progress=tracks_progress,
             )
         )
 
-    order = {"긴급": 0, "임박": 1, "여유": 2, "상시": 3}
+    order = {"긴급": 0, "임박": 1, "여유": 2, "상시": 3, "1회 재생": 4}
     jobs.sort(key=lambda j: (order[j.urgency], j.deadline or datetime.max, -j.remaining_sec))
     return jobs
 
@@ -248,6 +269,7 @@ def run_plan(
     dry_run: bool = False,
     rate: float | None = None,
     poll_sec: float = 15.0,
+    on_result: Callable[[Job, bool, str], None] | None = None,
 ) -> int:
     if not plan:
         print("재생할 대상이 없습니다.")
@@ -335,9 +357,13 @@ def run_plan(
                 # ended 로그(state 10)가 올라갈 시간을 준다.
                 time.sleep(3)
                 done += 1
+                if on_result:
+                    on_result(job, True, "ended")
             except Exception as exc:
                 print(f"    실패: {exc}")
                 failed += 1
+                if on_result:
+                    on_result(job, False, str(exc))
             finally:
                 page.close()
 

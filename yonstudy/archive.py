@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,10 +27,14 @@ class SessionExpired(RuntimeError):
     """세션이 실제로 끊긴 경우. 남은 강좌를 계속 시도해 봐야 의미가 없다."""
 
 class Archiver:
-    def __init__(self, client: LearnUsClient, store: Store, verbose: bool = True):
+    def __init__(
+        self, client: LearnUsClient, store: Store, verbose: bool = True,
+        file_sink=None,
+    ):
         self.c = client
         self.s = store
         self.verbose = verbose
+        self.file_sink = file_sink
         self._user_id: str | None = None
 
     @property
@@ -210,6 +215,14 @@ class Archiver:
                     hls_url=v.hls_url,
                     poster=v.poster,
                     subtitle_langs=",".join(v.subtitle_langs),
+                    is_progress=(
+                        None if v.progress.get("is_progress") is None
+                        else int(bool(v.progress.get("is_progress")))
+                    ),
+                    progress_period=(
+                        None if v.progress.get("progress_period") is None
+                        else int(bool(v.progress.get("progress_period")))
+                    ),
                     can_log_progress=int(v.can_log_progress),
                     max_rate=v.max_rate,
                     seek_restricted=int(v.seek_restricted),
@@ -423,7 +436,7 @@ class Archiver:
         """
         # 이미 받아둔 자료면 네트워크를 아예 건드리지 않는다.
         existing = self.s.file_record(a.url, "resource")
-        if existing and (existing["sha256"] or (existing["bytes"] or 0) > MAX_INLINE_FILE):
+        if self._file_is_current(course, a, existing, "resource", a.title):
             return
         try:
             body, final = self.c.get_bytes(a.url, referer=course.url)
@@ -445,7 +458,7 @@ class Archiver:
 
     def _fetch_file(self, course, a, url, name, role, cdir, subdir) -> None:
         existing = self.s.file_record(url, role)
-        if existing and (existing["sha256"] or (existing["bytes"] or 0) > MAX_INLINE_FILE):
+        if self._file_is_current(course, a, existing, role, name):
             return
         try:
             body, _ = self.c.get_bytes(url, referer=a.url)
@@ -454,7 +467,62 @@ class Archiver:
             return
         self._save_bytes(course, a, body, url, name, role, cdir, subdir)
 
+    def _file_is_current(self, course, a, existing, role, name) -> bool:
+        if not existing:
+            return False
+        if self.file_sink is None:
+            return bool(existing["sha256"] or (existing["bytes"] or 0) > MAX_INLINE_FILE)
+        desired = self.file_sink.file_path(
+            year=course.year, semester=course.semester,
+            course_slug=course.slug, activity_title=a.title,
+            file_id=existing["id"], name=existing["name"] or name, role=role,
+            section_idx=getattr(a, "section_idx", None),
+            section_name=getattr(a, "section_name", None),
+            open_from=getattr(a, "open_from", None), saved_at=existing["saved_at"],
+        )
+        previous = existing["remote_path"]
+        if role == "resource" and previous and previous != desired:
+            move = getattr(self.file_sink, "move", None)
+            if move is not None and move(previous, desired, size=existing["bytes"]):
+                self.s.update_file_remote(existing["url"], role, desired, "ok")
+                return True
+        relative = desired if role == "resource" else (previous or desired)
+        if not self.file_sink.exists(relative, existing["bytes"]):
+            return False
+        self.s.update_file_remote(existing["url"], role, relative, "ok")
+        return True
+
     def _save_bytes(self, course, a, body, url, name, role, cdir, subdir) -> None:
+        safe = re.sub(r'[\\/:*?"<>|]', "_", name)[:80]
+        if self.file_sink is not None:
+            digest = hashlib.sha256(body).hexdigest()
+            size = len(body)
+            self.s.save_file(
+                {
+                    "course_id": course.course_id, "cmid": a.cmid, "role": role,
+                    "name": safe, "url": url, "sha256": digest, "bytes": size,
+                    "saved_at": _now(),
+                }
+            )
+            record = self.s.file_record(url, role)
+            desired = self.file_sink.file_path(
+                year=course.year, semester=course.semester,
+                course_slug=course.slug, activity_title=a.title,
+                file_id=record["id"], name=safe, role=role,
+                section_idx=getattr(a, "section_idx", None),
+                section_name=getattr(a, "section_name", None),
+                open_from=getattr(a, "open_from", None), saved_at=record["saved_at"],
+            )
+            relative = desired if role == "resource" else (record["remote_path"] or desired)
+            try:
+                uploaded = self.file_sink.upload_bytes(relative, body)
+            except Exception:
+                self.s.update_file_remote(url, role, relative, "error")
+                raise
+            self.s.update_file_remote(url, role, relative, "ok")
+            action = "OneDrive 저장" if uploaded else "OneDrive에 이미 있음"
+            self.say(f"      {action} {safe} ({size//1024}KB)")
+            return
         if len(body) > MAX_INLINE_FILE:
             self.s.save_file(
                 {
@@ -466,7 +534,6 @@ class Archiver:
             self.say(f"      (건너뜀, {len(body)//1024//1024}MB) {name}")
             return
         digest, size = self.s.put_blob(body)
-        safe = re.sub(r'[\\/:*?"<>|]', "_", name)[:80]
         self.s.link_into_course(digest, f"{cdir}/{subdir}", safe)
         self.s.save_file(
             {

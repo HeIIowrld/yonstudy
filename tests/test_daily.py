@@ -185,12 +185,119 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn("오늘 일정", body)
         self.assertIn("제출할 과제", body)
         self.assertIn("과목별 순차 시청 목록", body)
-        self.assertIn("온라인출석부 확인", body)
+        self.assertIn("이번 학기 강의별 수강 현황", body)
         html_body = render_report_html(report)
-        self.assertIn("해야 할 일", html_body)
-        self.assertIn("동영상 수강 현황", html_body)
+        self.assertIn("현재 남은 항목", html_body)
+        self.assertIn("과목별 동영상 수강률", html_body)
         self.assertNotIn("ubboard", html_body)
-        self.assertIn("할 일", render_email_text(report))
+        self.assertIn("현재 남은 항목", render_email_text(report))
+
+    def test_email_lists_full_term_videos_but_excludes_future_from_rate(self):
+        day = self.today.isoformat()
+        tomorrow = (self.today + timedelta(days=1)).isoformat()
+        videos = [
+            (10, "완료한 강의", "y", day, 100, 600),
+            (11, "듣는 중인 강의", "n", day, 50, 300),
+            (12, "아직 안 본 강의", "n", day, 0, 0),
+            (13, "내일 공개 강의", "n", tomorrow, 0, 0),
+        ]
+        for cmid, title, completion, opens, progress, watched in videos:
+            row = self.activity(completion)
+            row.update(
+                cmid=cmid,
+                title=title,
+                url=f"https://example.test/vod/{cmid}",
+                open_from=f"{opens} 09:00:00",
+                open_to=f"{opens} 23:59:59",
+                seen_at=f"{day}T10:00:00",
+            )
+            self.store.save_activity(row)
+            self.store.save_vod(
+                {
+                    "cmid": cmid,
+                    "course_id": 1,
+                    "progress_pct": progress,
+                    "duration_sec": 600,
+                    "watched_sec": watched,
+                }
+            )
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+        self.assertEqual(len(report.attendance), 4)
+        self.assertNotIn(13, {row["cmid"] for row in report.todos})
+        self.assertEqual(report.completion_by_course[0]["effective_incomplete"], 2)
+        self.assertEqual(report.completion_by_course[0]["upcoming"], 1)
+
+        text_body = render_email_text(report)
+        self.assertIn("과목별 동영상 수강률", text_body)
+        self.assertIn("테스트과목: 공개분 1/3개 수강 완료 · 수강률 33%", text_body)
+        self.assertIn("학기 전체 확인 4개 · 공개 예정 1개", text_body)
+        self.assertIn("이번 학기 강의 목록 (4개)", text_body)
+        self.assertIn("공개 예정 · 테스트과목 · 1주차 · 내일 공개 강의", text_body)
+        self.assertNotIn("마지막 재생", text_body)
+
+        html_body = render_report_html(report)
+        self.assertIn("과목별 동영상 수강률", html_body)
+        self.assertIn("1/3개", html_body)
+        self.assertIn("width:33%", html_body)
+        self.assertIn("학기 전체 4개 · 공개 예정 1개", html_body)
+        self.assertIn("이번 학기 강의 목록 (4개)", html_body)
+        self.assertIn("내일 공개 강의", html_body)
+        self.assertNotIn("동영상 수강 현황", html_body)
+
+        full_body = render_report(report)
+        self.assertIn("[공개 예정] [테스트과목]", full_body)
+        self.assertNotIn("내일 공개 강의 · 미완료", full_body)
+
+    def test_report_lists_all_term_assignment_submission_states(self):
+        day = self.today.isoformat()
+        tomorrow = (self.today + timedelta(days=1)).isoformat()
+        assignments = [
+            (30, "제출한 과제", 1, day),
+            (31, "남은 과제", 0, day),
+            (32, "다음 과제", 0, tomorrow),
+        ]
+        for cmid, title, submitted, opens in assignments:
+            self.store.save_activity({
+                "cmid": cmid,
+                "course_id": 1,
+                "modname": "assign",
+                "title": title,
+                "url": f"https://example.test/assign/{cmid}",
+                "completion": "y" if submitted else "n",
+                "open_from": f"{opens} 09:00:00",
+                "open_to": f"{tomorrow} 23:59:59",
+                "restricted": 0,
+                "seen_at": f"{day}T10:00:00",
+            })
+            self.store.save_submission({
+                "cmid": cmid,
+                "course_id": 1,
+                "modname": "assign",
+                "title": title,
+                "submitted": submitted,
+                "due_at": f"{tomorrow} 23:59:59",
+                "seen_at": f"{day}T10:00:00",
+            })
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+        self.assertEqual(len(report.semester_assignments), 3)
+        self.assertNotIn(32, {row["cmid"] for row in report.assignments})
+        self.assertNotIn(32, {row["cmid"] for row in report.todos})
+
+        text_body = render_email_text(report)
+        self.assertIn("이번 학기 과제·제출 목록 (3개)", text_body)
+        self.assertIn("제출 완료 · 테스트과목 · 제출한 과제", text_body)
+        self.assertIn("미제출 · 테스트과목 · 남은 과제", text_body)
+        self.assertIn("공개 예정 · 테스트과목 · 다음 과제", text_body)
+        self.assertIn("현재 남은 항목", text_body)
+
+        html_body = render_report_html(report)
+        self.assertIn("이번 학기 과제·제출 목록 (3개)", html_body)
+        self.assertIn("제출 완료", html_body)
+        self.assertIn("공개 예정", html_body)
 
     @patch("yonstudy.daily.subprocess.run")
     def test_sendmail_transport(self, run):

@@ -1,10 +1,12 @@
 [Unit]
-Description=Check due LearnUs lectures three times daily with load-spreading jitter
+Description=Play due LearnUs lectures during the early-morning window
 
 [Timer]
-OnCalendar=*-*-* 10,15,20:00:00 Asia/Seoul
-Persistent=true
-RandomizedDelaySec=40m
+OnCalendar=*-*-* 02:30:00 Asia/Seoul
+OnCalendar=*-*-* 04:00:00 Asia/Seoul
+OnCalendar=*-*-* 05:30:00 Asia/Seoul
+Persistent=false
+RandomizedDelaySec=10m
 AccuracySec=1m
 Unit=yonstudy-watch.service
 

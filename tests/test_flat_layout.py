@@ -7,12 +7,26 @@ from yonstudy.flat_layout import (
     build_flat_plan,
     canonical_filename,
     lesson_number,
+    resource_filename,
     week_number,
 )
 from yonstudy.store import Store
 
 
 class FlatLayoutTests(unittest.TestCase):
+    def test_resource_filename_uses_week_then_date_fallback(self):
+        weekly = resource_filename(
+            section_idx=3, section_name="3주차", activity_title="Lecture 3-2",
+            name="slides.pdf", file_id=17,
+        )
+        self.assertEqual(weekly, "W03-L02__강의자료__slides__f17.pdf")
+
+        dated = resource_filename(
+            section_idx=None, section_name=None, activity_title="오리엔테이션",
+            name="orientation.pdf", file_id=18, saved_at="2026-09-03T08:00:00",
+        )
+        self.assertEqual(dated, "20260903__강의자료__orientation__f18.pdf")
+
     def test_week_and_lesson_normalization(self):
         self.assertEqual(week_number(1, "1주차 [9월01일 - 9월07일]", "Week 1-2"), 1)
         self.assertEqual(week_number(11, "", "11주차 동영상 강의"), 11)

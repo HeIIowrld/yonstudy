@@ -1,5 +1,5 @@
 [Unit]
-Description=LearnUs archive, OneDrive export, and daily report
+Description=LearnUs sync and direct OneDrive upload
 Documentation=file:/root/yonstudy/README.md
 Wants=network-online.target
 After=network-online.target
@@ -10,7 +10,7 @@ WorkingDirectory=/root/yonstudy
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-/etc/yonstudy/yonstudy.env
-ExecStart=/usr/bin/flock -E 0 -n /run/yonstudy/automation.lock /usr/bin/python3 /root/yonstudy/cli.py automate
+ExecStart=/usr/bin/flock -E 0 -n /run/yonstudy/automation.lock /usr/bin/python3 /root/yonstudy/cli.py automate --no-mail
 UMask=0077
 RuntimeDirectory=yonstudy
 RuntimeDirectoryMode=0700
@@ -21,7 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/root/yonstudy/store /root/yonstudy/exports /root/.config/rclone
+ReadWritePaths=/root/yonstudy/store /root/.config/rclone /root/ys.learnus.org_cookies.txt
 
 [Install]
 WantedBy=multi-user.target

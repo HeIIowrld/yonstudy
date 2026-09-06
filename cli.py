@@ -7,7 +7,7 @@
     python3 cli.py status                 아카이브 현황
     python3 cli.py plan                   자동수강 대상/우선순위 계산
     python3 cli.py watch                  진도 선완성 실행 (실제 재생)
-    python3 cli.py report [--sync]        오늘 공개/완료/업데이트/할 일 리포트
+    python3 cli.py report [--sync]        이번 학기 진도/제출 + 오늘 업데이트 리포트
     python3 cli.py download [--video]     오디오 + 슬라이드 프레임 (+영상 원본) 다운로드
     python3 cli.py analyze --cmid N       슬라이드 ↔ 자막 정렬 분석
 """
@@ -160,17 +160,31 @@ def cmd_status(args) -> int:
 
 def cmd_plan(args) -> int:
     from yonstudy.autoplay import build_plan
+    from yonstudy.daily import SEOUL, current_term
 
     store = Store(args.store)
-    plan = build_plan(store)
+    year, semester = current_term(datetime.now(SEOUL).date())
+    course_ids = {
+        int(row["course_id"]) for row in store.query(
+            "SELECT course_id FROM course WHERE year=? AND semester=?",
+            (year, semester),
+        )
+    }
+    plan = build_plan(
+        store, course_ids=course_ids, include_untracked_once=True
+    )
     if not plan:
-        print("자동수강 대상이 없습니다. (열린 진도처리기간 + 미완료 영상이 없음)")
+        print(
+            "자동수강 대상이 없습니다. "
+            "(현재 수강 가능한 미완료 영상 또는 1회 재생 대상이 없음)"
+        )
         return 0
     print(f"\n=== 자동수강 계획: {len(plan)}편 ===")
     for i, j in enumerate(plan, 1):
         print(
             f" {i:>3}. [{j.urgency:>6}] {j.course_name[:14]:14s} {j.title[:38]:38s} "
-            f"남은 {j.remaining_sec//60}분  정상마감 {j.open_to or '없음'}  {j.rate}x"
+            f"남은 {j.remaining_sec//60}분  "
+            f"{'정상마감 ' + j.open_to if j.open_to else '완주 1회 기록'}  {j.rate}x"
         )
     total = sum(j.remaining_sec for j in plan)
     print(f"\n  총 {total/3600:.1f}시간 분량 → 2배속 기준 약 {total/2/3600:.1f}시간 소요")
@@ -179,12 +193,82 @@ def cmd_plan(args) -> int:
 
 def cmd_watch(args) -> int:
     from yonstudy.autoplay import build_plan, run_plan
+    from yonstudy.daily import SEOUL, current_term
 
     store = Store(args.store)
-    plan = build_plan(store)
+    year, semester = current_term(datetime.now(SEOUL).date())
+    course_ids = {
+        int(row["course_id"]) for row in store.query(
+            "SELECT course_id FROM course WHERE year=? AND semester=?",
+            (year, semester),
+        )
+    }
+    plan = build_plan(
+        store, course_ids=course_ids, include_untracked_once=True
+    )
     if args.limit:
         plan = plan[: args.limit]
-    return run_plan(plan, args.cookies, dry_run=args.dry_run, rate=args.rate)
+
+    def record_result(job, ok: bool, note: str) -> None:
+        kind = "watch" if job.tracks_progress else "playback_once"
+        store.log(kind, str(job.cmid), ok, note)
+        store.commit()
+
+    code = run_plan(
+        plan, args.cookies, dry_run=args.dry_run, rate=args.rate,
+        on_result=record_result,
+    )
+    if code != 0 or args.dry_run:
+        return code
+
+    tracked = [job for job in plan if job.tracks_progress]
+    if not tracked:
+        return 0
+
+    # 수동 watch도 완주 후 서버 진도를 다시 읽는다. 이 단계가 없으면 로컬 DB가
+    # 0%인 채 남아 같은 영상을 다음 계획에서 다시 고를 수 있다.
+    try:
+        archiver = Archiver(get_client(args), store)
+        selected_course_ids = {job.course_id for job in tracked}
+        courses = [
+            course for course in archiver.sync_courses()
+            if course.course_id in selected_course_ids
+        ]
+        for course in courses:
+            archiver.sync_course(
+                course, probe_vod=False, fetch_subtitles=False,
+                fetch_files=False, fetch_boards=False,
+            )
+        store.commit()
+    except Exception as exc:
+        print(f"재생은 끝났지만 진도 재확인에 실패했습니다: {exc}", file=sys.stderr)
+        return 1
+
+    failed_verification = []
+    for job in tracked:
+        rows = store.query(
+            """
+            SELECT v.progress_pct,a.completion
+              FROM vod v JOIN activity a ON a.cmid=v.cmid
+             WHERE v.cmid=?
+            """,
+            (job.cmid,),
+        )
+        row = dict(rows[0]) if rows else {}
+        if not (
+            (row.get("progress_pct") or 0) >= 100
+            or row.get("completion") == "y"
+        ):
+            failed_verification.append(job.title)
+    if failed_verification:
+        print(
+            "재생 완료 후 진도 100%를 확인하지 못했습니다: "
+            + ", ".join(failed_verification),
+            file=sys.stderr,
+        )
+        return 1
+    print(f"진도 재확인 완료: {len(tracked)}편 모두 100%")
+    return 0
 
 
 def cmd_report(args) -> int:
@@ -424,6 +508,43 @@ def cmd_monitor(args) -> int:
     return code
 
 
+def cmd_archive_only(args) -> int:
+    """진도 비추적 VOD를 재생 없이 OneDrive에 원본 보관한다."""
+    from dataclasses import asdict
+    from yonstudy.daily import SEOUL, current_term
+    from yonstudy.onedrive import RcloneOneDrive
+    from yonstudy.video_archive import archive_untracked_vods
+
+    now = datetime.now(SEOUL)
+    year, semester = current_term(now.date())
+    store = Store(args.store)
+    client = None
+    course_ids = set(args.course or []) or None
+    if not args.dry_run:
+        client = get_client(args)
+        archiver = Archiver(client, store)
+        courses = [
+            course for course in archiver.sync_courses()
+            if course.year == year and course.semester == semester
+            and (not course_ids or course.course_id in course_ids)
+        ]
+        for course in courses:
+            archiver.sync_course(
+                course, probe_vod=True, fetch_subtitles=False,
+                fetch_files=False, fetch_boards=False,
+            )
+        store.commit()
+
+    sink = RcloneOneDrive(args.remote)
+    result = archive_untracked_vods(
+        store, sink, year=year, semester=semester,
+        course_ids=course_ids, limit=args.limit,
+        client=client, dry_run=args.dry_run,
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
+    return 1 if result.failed_files else 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="yonstudy", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -459,7 +580,7 @@ def main() -> int:
     w.add_argument("--dry-run", action="store_true")
     w.set_defaults(fn=cmd_watch)
 
-    rep = sub.add_parser("report", help="오늘 공개/완료/업데이트/할 일 리포트")
+    rep = sub.add_parser("report", help="이번 학기 진도/제출 + 오늘 업데이트 리포트")
     rep.add_argument("--sync", action="store_true", help="현재 학기를 먼저 가볍게 동기화")
     rep.add_argument(
         "--sync-if-stale",
@@ -536,6 +657,15 @@ def main() -> int:
     monitor.add_argument("--course", nargs="*", type=int)
     monitor.add_argument("--dry-run", action="store_true")
     monitor.set_defaults(fn=cmd_monitor)
+
+    archive_only = sub.add_parser(
+        "archive-only", help="진도 비추적 VOD를 재생 없이 OneDrive에 원본 보관",
+    )
+    archive_only.add_argument("--course", nargs="*", type=int)
+    archive_only.add_argument("--limit", type=int)
+    archive_only.add_argument("--remote", default=DEFAULT_REMOTE)
+    archive_only.add_argument("--dry-run", action="store_true")
+    archive_only.set_defaults(fn=cmd_archive_only)
 
     an = sub.add_parser("analyze")
     an.add_argument("--cmid", type=int, required=True)

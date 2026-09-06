@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS vod (
     duration_sec INTEGER,
     watched_sec INTEGER,
     progress_pct REAL,
+    is_progress INTEGER,        -- 이 VOD 자체가 진도 추적 대상인가
+    progress_period INTEGER,    -- 현재 진도 처리 기간인가
     can_log_progress INTEGER,   -- 지금 재생하면 진도가 잡히는가
     max_rate REAL,              -- 서버가 허용하는 최대 배속
     seek_restricted INTEGER,
@@ -71,8 +73,11 @@ CREATE TABLE IF NOT EXISTS submission (
 CREATE TABLE IF NOT EXISTS file (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     course_id INTEGER, cmid INTEGER,
-    role TEXT,             -- submission / introattachment / resource / subtitle
+    role TEXT,             -- submission / introattachment / resource / subtitle / video
     name TEXT, url TEXT, sha256 TEXT, bytes INTEGER, saved_at TEXT,
+    remote_path TEXT,
+    remote_status TEXT,
+    remote_saved_at TEXT,
     UNIQUE(url, role)
 );
 
@@ -190,14 +195,29 @@ class Store:
 
     def file_record(self, url: str, role: str):
         return self.db.execute(
-            "SELECT sha256,bytes FROM file WHERE url=? AND role=?", (url, role)
+            "SELECT * FROM file WHERE url=? AND role=?", (url, role)
         ).fetchone()
 
+    def update_file_remote(self, url: str, role: str, path: str, status: str) -> None:
+        self.db.execute(
+            """
+            UPDATE file
+               SET remote_path=?,remote_status=?,remote_saved_at=?
+             WHERE url=? AND role=?
+            """,
+            (path, status, _now(), url, role),
+        )
+
     def has_missing_file(self, cmid: int, role: str) -> bool:
-        """메타데이터만 있고 실제 blob을 받지 못한 파일이 있는지 확인한다."""
+        """로컬 blob 또는 OneDrive 직접 저장에 실패해 다시 받아야 하는가."""
         return (
             self.db.execute(
-                "SELECT 1 FROM file WHERE cmid=? AND role=? AND sha256 IS NULL LIMIT 1",
+                """
+                SELECT 1 FROM file
+                 WHERE cmid=? AND role=?
+                   AND (sha256 IS NULL OR remote_status IN ('error','missing'))
+                 LIMIT 1
+                """,
                 (cmid, role),
             ).fetchone()
             is not None
@@ -350,8 +370,13 @@ class Store:
             )
         cols = ", ".join(row)
         marks = ", ".join("?" * len(row))
+        updates = ", ".join(
+            f"{column}=excluded.{column}" for column in row if column not in {"url", "role"}
+        )
         self.db.execute(
-            f"INSERT OR REPLACE INTO file ({cols}) VALUES ({marks})", tuple(row.values())
+            f"INSERT INTO file ({cols}) VALUES ({marks}) "
+            f"ON CONFLICT(url,role) DO UPDATE SET {updates}",
+            tuple(row.values()),
         )
 
     def save_transcript(self, row: dict) -> None:

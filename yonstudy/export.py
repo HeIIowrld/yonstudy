@@ -61,6 +61,10 @@ def export_onedrive_tree(
     dry_run: bool = False,
 ) -> ExportResult:
     """자료/게시판을 내보낸다. 기존 대상 파일은 지우지 않는 증분 복사다."""
+    # flat_layout은 term_folder를 이 모듈에서 가져오므로 순환 import를 피하기 위해
+    # 실행 시점에 공통 강의자료 파일명 함수를 불러온다.
+    from .flat_layout import resource_filename
+
     root = Path(destination)
     result = ExportResult(destination=str(root))
     courses = store.query(
@@ -77,12 +81,13 @@ def export_onedrive_tree(
         course_name = _safe(course["slug"] or course["title"] or course["name"])
         course_dir = root / term / course_name
         if not dry_run:
-            for category in ("강의자료", "게시판_첨부", "QNA_공지"):
+            for category in ("게시판_첨부", "QNA_공지"):
                 (course_dir / category).mkdir(parents=True, exist_ok=True)
 
         files = store.query(
             """
-            SELECT f.id,f.cmid,f.role,f.name,f.sha256,f.bytes,a.title AS activity_title
+            SELECT f.id,f.cmid,f.role,f.name,f.sha256,f.bytes,f.saved_at,
+                   a.title AS activity_title,a.section_idx,a.section_name,a.open_from
               FROM file f LEFT JOIN activity a ON a.cmid=f.cmid
              WHERE f.course_id=? AND f.role IN ('resource','post')
              ORDER BY f.role,f.cmid,f.name
@@ -93,7 +98,12 @@ def export_onedrive_tree(
             base_name = row["name"] or f"파일_{row['cmid']}"
             if row["role"] == "resource":
                 result.material_files += 1
-                rel = Path("강의자료") / _safe(f"{row['id']}_{base_name}")
+                rel = Path(resource_filename(
+                    section_idx=row["section_idx"], section_name=row["section_name"],
+                    activity_title=row["activity_title"], name=base_name,
+                    file_id=row["id"], open_from=row["open_from"],
+                    saved_at=row["saved_at"],
+                ))
             else:
                 result.board_attachments += 1
                 board = _safe(row["activity_title"], f"게시판_{row['cmid']}")

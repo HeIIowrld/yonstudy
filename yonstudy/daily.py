@@ -69,6 +69,7 @@ class DailyReport:
     assignments: list[dict]
     viewing_queue: list[dict]
     attendance: list[dict]
+    semester_assignments: list[dict]
     completion_by_course: list[dict]
     untracked: list[dict]
 
@@ -372,7 +373,7 @@ def build_daily_report(
            )
          ORDER BY COALESCE(a.late_until,a.open_to,s.due_at,'9999'),c.name,a.cmid
         """,
-        course_args + (horizon_s, day_s, horizon_s),
+        course_args + (horizon_s, day_s, day_s),
     )
     todos = []
     horizon = target + timedelta(days=horizon_days)
@@ -382,7 +383,8 @@ def build_daily_report(
         final_deadline = _date_in(row.get("late_until")) or deadline
         if opens and opens > horizon:
             continue
-        # 미래 항목은 미리보기 범위까지만, 이미 지난 미완료 항목은 놓치지 않는다.
+        # 아직 공개되지 않은 항목은 학기 전체 목록에서 "공개 예정"으로만 보여 준다.
+        # 여기에는 현재 처리할 수 있는 항목과 이미 지난 미완료 항목만 남긴다.
         if deadline and deadline > horizon:
             continue
         if deadline is None and final_deadline and final_deadline > horizon:
@@ -421,19 +423,39 @@ def build_daily_report(
     from .monitor import attendance_snapshot, viewing_queue
 
     viewing = viewing_queue(store, year=year, semester=semester, now=now)
-    attendance = [
-        row for row in attendance_snapshot(store, year=year, semester=semester)
-        if row.get("progress_pct") is not None
-        or not row.get("open_from")
-        or str(row.get("open_from"))[:10] <= day_s
-    ]
+    # 일일 리포트에서도 이번 학기 전체 목록을 보여 준다. 아직 공개되지 않은
+    # 영상은 수강률 분모에서는 빼되, 목록에서는 "공개 예정"으로 구분한다.
+    attendance = attendance_snapshot(store, year=year, semester=semester)
+    semester_assignments = _rows(
+        store,
+        f"""
+        SELECT s.cmid,c.course_id,c.name AS course_name,
+               COALESCE(a.modname,s.modname) AS modname,
+               COALESCE(a.title,s.title) AS title,
+               a.url,a.section_idx,a.section_name,a.open_from,a.open_to,a.late_until,
+               a.completion,s.submitted,s.status,s.grading_status,s.due_at,
+               s.last_modified,s.grade,s.seen_at
+          FROM submission s
+          JOIN course c ON c.course_id=s.course_id
+          LEFT JOIN activity a ON a.cmid=s.cmid
+         WHERE {course_sql} AND COALESCE(a.restricted,0)=0
+         ORDER BY c.name,COALESCE(s.due_at,a.open_to,'9999'),
+                  COALESCE(a.section_idx,0),s.cmid
+        """,
+        course_args,
+    )
 
     completion_by_course = _rows(
         store,
         f"""
         SELECT c.course_id,c.name AS course_name,
                SUM(CASE WHEN a.completion='y' THEN 1 ELSE 0 END) AS done,
-               SUM(CASE WHEN a.completion='n' THEN 1 ELSE 0 END) AS incomplete,
+               SUM(CASE WHEN a.completion='n'
+                         AND (a.open_from IS NULL OR substr(a.open_from,1,10)<=?)
+                        THEN 1 ELSE 0 END) AS incomplete,
+               SUM(CASE WHEN a.open_from IS NOT NULL
+                         AND substr(a.open_from,1,10)>?
+                        THEN 1 ELSE 0 END) AS upcoming,
                SUM(CASE WHEN a.completion IS NULL THEN 1 ELSE 0 END) AS untracked,
                SUM(CASE WHEN a.completion IS NULL
                          AND (v.progress_pct IS NOT NULL OR s.submitted IS NOT NULL)
@@ -444,17 +466,20 @@ def build_daily_report(
                COUNT(*) AS total,
                SUM(CASE WHEN a.completion='y' OR v.progress_pct>=100 OR s.submitted=1
                         THEN 1 ELSE 0 END) AS effective_done,
-               SUM(CASE WHEN a.completion='n' OR (v.progress_pct IS NOT NULL AND v.progress_pct<100)
-                              OR s.submitted=0 THEN 1 ELSE 0 END) AS effective_incomplete
+               SUM(CASE WHEN (a.open_from IS NULL OR substr(a.open_from,1,10)<=?)
+                              AND (a.completion='n'
+                                   OR (v.progress_pct IS NOT NULL AND v.progress_pct<100)
+                                   OR s.submitted=0)
+                        THEN 1 ELSE 0 END) AS effective_incomplete
           FROM course c
           JOIN activity a ON a.course_id=c.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
-         WHERE {course_sql}
+         WHERE {course_sql} AND COALESCE(a.restricted,0)=0
          GROUP BY c.course_id,c.name
          ORDER BY c.name
         """,
-        course_args,
+        (day_s, day_s, day_s) + course_args,
     )
     untracked = _rows(
         store,
@@ -467,6 +492,7 @@ def build_daily_report(
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
          WHERE {course_sql} AND a.completion IS NULL
+           AND COALESCE(a.restricted,0)=0
          GROUP BY c.course_id,c.name,a.modname
          ORDER BY c.name,a.modname
         """,
@@ -490,6 +516,7 @@ def build_daily_report(
         assignments=assignments,
         viewing_queue=viewing,
         attendance=attendance,
+        semester_assignments=semester_assignments,
         completion_by_course=completion_by_course,
         untracked=untracked,
     )
@@ -516,14 +543,26 @@ def render_report(report: DailyReport) -> str:
         r for r in report.completed
         if r not in video_completed and r not in submission_completed
     ]
+    video_progress = _video_progress_by_course(report)
+    term_video_total = sum(r["total"] for r in video_progress)
+    term_video_done = sum(r["done"] for r in video_progress)
+    term_video_remaining = sum(r["remaining"] for r in video_progress)
+    term_video_upcoming = sum(r["upcoming"] for r in video_progress)
+    term_assignment_done = sum(
+        row.get("submitted") == 1 for row in report.semester_assignments
+    )
+    term_assignment_remaining = len(_remaining_assignments(report))
     lines = [
         f"[yonstudy 일일 리포트] {report.target.isoformat()} (KST)",
         f"대상: {report.year} {report.semester}",
         f"생성: {report.generated_at}",
         f"데이터 최종 동기화: {report.source_updated_at or '없음'}",
-        f"요약: 할 일 {len(report.todos)} (긴급/지각 {urgent}) · "
-        f"오늘 일정 {len(report.today_schedule)} · 미제출 과제 {len(report.assignments)} · "
-        f"시청 대기 {len(report.viewing_queue)} · "
+        f"학기 요약: 영상 {term_video_total}개 (완료 {term_video_done} · "
+        f"남음 {term_video_remaining} · 공개 예정 {term_video_upcoming}) · "
+        f"제출 활동 {len(report.semester_assignments)}개 (제출 {term_assignment_done} · "
+        f"현재 미제출 {term_assignment_remaining})",
+        f"오늘 요약: 할 일 {len(report.todos)} (긴급/지각 {urgent}) · "
+        f"오늘 일정 {len(report.today_schedule)} · 시청 대기 {len(report.viewing_queue)} · "
         f"새 글 {len(report.new_posts)} · 새 자료 {len(report.new_files)} · "
         f"영상 출석 완료 {len(video_completed)} · 제출 완료 {len(submission_completed)} · "
         f"자료·기타 완료 표시 {len(other_completed)}",
@@ -585,12 +624,27 @@ def render_report(report: DailyReport) -> str:
         for r in report.viewing_queue
     ] or ["- 없음"]
 
-    lines += ["", f"온라인출석부 확인 ({len(report.attendance)})"]
+    lines += ["", f"이번 학기 강의별 수강 현황 ({len(report.attendance)})"]
     lines += [
-        f"- [{'정상' if r['verified'] else '확인 필요'}] [{r['course_name']}] {r['title']} · "
-        f"콘텐츠 {r.get('duration_label') or '-'} · 최대 학습위치 "
-        f"{r.get('max_position_label') or '-'} · 진도 {r.get('progress_pct') or 0:g}%"
+        f"- [{_video_term_status(r, report.target)}] [{r['course_name']}] "
+        f"{r.get('section_name') or ''} · {r['title']} · 진도 {r.get('progress_pct') or 0:g}%"
+        + (f" · 남은 {_video_remaining_minutes(r)}분"
+           if _video_term_status(r, report.target) in {"수강 중", "미수강", "1회 재생 필요"}
+           and _video_remaining_minutes(r) is not None else "")
+        + (f" · 공개 {str(r['open_from'])[:10]}" if r.get("open_from") else "")
+        + (f" · 출석 마감 {str(r['open_to'])[:10]}" if r.get("open_to") else "")
+        + (f" · {r['url']}" if r.get("url") else "")
         for r in report.attendance
+    ] or ["- 없음"]
+
+    lines += ["", f"이번 학기 과제·제출 현황 ({len(report.semester_assignments)})"]
+    lines += [
+        f"- [{_assignment_term_status(r, report.target)}] [{r['course_name']}] "
+        f"{r.get('section_name') or ''} · {r['title']}"
+        + (f" · 마감 {str(r.get('due_at') or r.get('open_to'))[:16]}"
+           if r.get("due_at") or r.get("open_to") else "")
+        + (f" · {r['url']}" if r.get("url") else "")
+        for r in report.semester_assignments
     ] or ["- 없음"]
 
     lines += ["", f"새 Q&A·공지·게시글 ({len(report.new_posts)})"]
@@ -634,7 +688,8 @@ def render_report(report: DailyReport) -> str:
     lines += ["", "과목별 진행 현황"]
     lines += [
         f"- {r['course_name']}: 확인된 완료 {r['effective_done']}, "
-        f"미완료 {r['effective_incomplete']}, 완료 체크 {r['done']}, "
+        f"현재 미완료 {r['effective_incomplete']}, 공개 예정 {r['upcoming']}, "
+        f"완료 체크 {r['done']}, "
         f"체크표시 없음 {r['untracked']} (별도 진도/제출 상태 있음 {r['alternate_state']}, "
         f"판단 신호 없음 {r['no_state']}) / 전체 {r['total']}"
         for r in report.completion_by_course
@@ -663,25 +718,151 @@ def _email_completion_groups(report: DailyReport) -> tuple[list[dict], list[dict
     return videos, submissions, others
 
 
+def _video_term_status(row: dict, target: date) -> str:
+    opens = _date_in(row.get("open_from"))
+    if opens and opens > target:
+        return "공개 예정"
+    if row.get("is_progress") == 0:
+        return "1회 재생 완료" if row.get("played_once") else "1회 재생 필요"
+    progress = float(row.get("progress_pct") or 0)
+    if row.get("completion") == "y" or progress >= 100:
+        return "수강 완료"
+    if progress > 0 or int(row.get("watched_sec") or 0) > 0:
+        return "수강 중"
+    return "미수강"
+
+
+def _video_remaining_minutes(row: dict) -> int | None:
+    duration = row.get("duration_sec")
+    if not duration:
+        return None
+    watched = int(row.get("watched_sec") or 0)
+    return (max(0, int(duration) - watched) + 59) // 60
+
+
+def _assignment_term_status(row: dict, target: date) -> str:
+    if row.get("submitted") == 1:
+        return "제출 완료"
+    opens = _date_in(row.get("open_from"))
+    if opens and opens > target:
+        return "공개 예정"
+    deadline = _date_in(row.get("due_at") or row.get("open_to"))
+    if deadline and deadline < target:
+        return "미제출 · 마감 지남"
+    return "미제출"
+
+
+def _remaining_assignments(report: DailyReport) -> list[dict]:
+    return [
+        row for row in report.semester_assignments
+        if _assignment_term_status(row, report.target) != "제출 완료"
+        and _assignment_term_status(row, report.target) != "공개 예정"
+    ]
+
+
+def _video_progress_by_course(report: DailyReport) -> list[dict]:
+    """이번 학기 영상을 과목별로 묶고, 수강률은 공개된 영상만으로 계산한다."""
+    courses: dict[object, dict] = {}
+    for row in report.attendance:
+        key = row.get("course_id") or row.get("course_name")
+        course = courses.setdefault(
+            key,
+            {
+                "course_name": row.get("course_name") or "과목명 없음",
+                "done": 0,
+                "in_progress": 0,
+                "not_started": 0,
+                "upcoming": 0,
+                "available": 0,
+                "total": 0,
+            },
+        )
+        course["total"] += 1
+        status = _video_term_status(row, report.target)
+        if status == "공개 예정":
+            course["upcoming"] += 1
+            continue
+        course["available"] += 1
+        if status in {"수강 완료", "1회 재생 완료"}:
+            course["done"] += 1
+        elif status == "수강 중":
+            course["in_progress"] += 1
+        else:
+            course["not_started"] += 1
+
+    result = []
+    for course in courses.values():
+        available = course["available"]
+        course["percent"] = round(course["done"] / available * 100) if available else 0
+        course["remaining"] = course["in_progress"] + course["not_started"]
+        result.append(course)
+    return result
+
+
 def render_email_text(report: DailyReport) -> str:
     """메일 클라이언트가 HTML을 지원하지 않을 때 보여 줄 간결한 대체 본문."""
     videos, submissions, others = _email_completion_groups(report)
+    video_progress = _video_progress_by_course(report)
+    remaining_assignments = _remaining_assignments(report)
+    term_video_total = sum(r["total"] for r in video_progress)
+    term_video_done = sum(r["done"] for r in video_progress)
+    term_video_remaining = sum(r["remaining"] for r in video_progress)
+    term_video_upcoming = sum(r["upcoming"] for r in video_progress)
+    term_assignment_done = sum(
+        row.get("submitted") == 1 for row in report.semester_assignments
+    )
     lines = [
         f"{report.target.month}월 {report.target.day}일 런어스 요약",
         f"{report.year}년 {report.semester}",
         "",
-        f"오늘 일정 {len(report.today_schedule)}개 · 미제출 과제 {len(report.assignments)}개 · "
-        f"볼 영상 {len(report.viewing_queue)}개 · 새 소식 {len(report.new_posts) + len(report.new_files)}개",
+        f"이번 학기 영상 {term_video_total}개 · 완료 {term_video_done}개 · "
+        f"현재 남은 영상 {term_video_remaining}개 · 공개 예정 {term_video_upcoming}개",
+        f"이번 학기 제출 활동 {len(report.semester_assignments)}개 · "
+        f"제출 {term_assignment_done}개 · 현재 미제출 {len(remaining_assignments)}개",
+        f"오늘 일정 {len(report.today_schedule)}개 · 새 소식 "
+        f"{len(report.new_posts) + len(report.new_files)}개",
     ]
     if report.stale:
         lines += ["", "주의: 오늘 자료를 아직 모두 확인하지 못해 내용이 달라질 수 있습니다."]
 
-    if report.today_schedule or report.assignments or report.viewing_queue:
-        lines += ["", "해야 할 일"]
-        for row in report.assignments:
+    if video_progress:
+        lines += ["", "과목별 동영상 수강률"]
+        lines += [
+            f"- {r['course_name']}: 공개분 {r['done']}/{r['available']}개 수강 완료 · "
+            f"수강률 {r['percent']}% · 남음 {r['remaining']}개 "
+            f"(수강 중 {r['in_progress']} · 미수강 {r['not_started']}) · "
+            f"학기 전체 확인 {r['total']}개 · 공개 예정 {r['upcoming']}개"
+            for r in video_progress
+        ]
+
+    lines += ["", f"이번 학기 강의 목록 ({len(report.attendance)}개)"]
+    lines += [
+        f"- {_video_term_status(row, report.target)} · {row['course_name']} · "
+        f"{row.get('section_name') or '주차 미표시'} · {row['title']} · "
+        f"진도 {row.get('progress_pct') or 0:g}%"
+        + (f" · 남은 {_video_remaining_minutes(row)}분"
+           if _video_term_status(row, report.target) in {"수강 중", "미수강", "1회 재생 필요"}
+           and _video_remaining_minutes(row) is not None else "")
+        + (f" · 출석 마감 {_format_datetime_ko(row.get('open_to'))}"
+           if row.get("open_to") else "")
+        for row in report.attendance
+    ] or ["- 확인된 동영상 강의 없음"]
+
+    lines += ["", f"이번 학기 과제·제출 목록 ({len(report.semester_assignments)}개)"]
+    lines += [
+        f"- {_assignment_term_status(row, report.target)} · {row['course_name']} · {row['title']}"
+        + (f" · {_deadline_summary(row)}"
+           if row.get("due_at") or row.get("open_to") else "")
+        for row in report.semester_assignments
+    ] or ["- 확인된 제출 활동 없음"]
+
+    if report.today_schedule or remaining_assignments or report.viewing_queue:
+        lines += ["", "현재 남은 항목"]
+        for row in remaining_assignments:
             lines.append(
                 f"- 과제 · {row['course_name']} · {row['title']}"
-                + f" · {_deadline_summary(row)}"
+                + (f" · {_deadline_summary(row)}"
+                   if row.get("due_at") or row.get("open_to") else "")
             )
         todo_by_cmid = {r["cmid"]: r for r in report.todos}
         for row in report.viewing_queue:
@@ -692,28 +873,19 @@ def render_email_text(report: DailyReport) -> str:
                 + (f" · 권장 수강일 {recommended}" if recommended else "")
                 + (f" · {_deadline_summary(todo)}" if todo.get("open_to") else "")
             )
-        assignment_ids = {r["cmid"] for r in report.assignments}
+        assignment_ids = {r["cmid"] for r in remaining_assignments}
         viewing_ids = {r["cmid"] for r in report.viewing_queue}
         for row in report.today_schedule:
             if row["cmid"] not in assignment_ids | viewing_ids:
                 lines.append(f"- 일정 · {row['course_name']} · {row['title']}")
     else:
-        lines += ["", "현재 확인된 미제출 과제나 미수강 영상은 없습니다."]
+        lines += ["", "현재 남은 미제출 과제나 수강 가능한 미완료 영상은 없습니다."]
 
     if videos or submissions or others:
         lines += ["", "오늘 확인된 완료"]
         lines += [f"- 영상 출석 · {r['course_name']} · {r['title']}" for r in videos]
         lines += [f"- 과제 제출 · {r['course_name']} · {r['title']}" for r in submissions]
         lines += [f"- 자료 확인 · {r['course_name']} · {r['title']}" for r in others]
-
-    if report.attendance:
-        lines += ["", "동영상 수강 현황"]
-        lines += [
-            f"- {_attendance_status(r)[0]} · {r['course_name']} · {r['title']} · "
-            f"마지막 재생 {r.get('max_position_label') or '-'} / 전체 {r.get('duration_label') or '-'} · "
-            f"진도 {r.get('progress_pct') or 0:g}%"
-            for r in report.attendance
-        ]
 
     if report.new_posts:
         lines += ["", "새 공지·Q&A"]
@@ -736,7 +908,11 @@ def render_report_html(report: DailyReport) -> str:
     """Gmail 등에서 바로 읽기 좋은 단일 열 HTML 브리핑."""
     esc = lambda value: html.escape(str(value or ""), quote=True)
     videos, submissions, others = _email_completion_groups(report)
-    attendance_ok = sum(bool(r.get("verified")) for r in report.attendance)
+    video_progress = _video_progress_by_course(report)
+    completed_video_count = sum(r["done"] for r in video_progress)
+    remaining_video_count = sum(r["remaining"] for r in video_progress)
+    total_video_count = sum(r["total"] for r in video_progress)
+    remaining_assignments = _remaining_assignments(report)
 
     def link(url: str | None, label: str = "LearnUs에서 보기") -> str:
         if not url:
@@ -772,10 +948,10 @@ def render_report_html(report: DailyReport) -> str:
         )
 
     cards = [
-        ("오늘 일정", len(report.today_schedule), "#1d4ed8"),
-        ("미제출 과제", len(report.assignments), "#b45309"),
-        ("볼 영상", len(report.viewing_queue), "#7c3aed"),
-        ("수강 확인", attendance_ok, "#047857"),
+        ("학기 영상", total_video_count, "#1d4ed8"),
+        ("수강 완료", completed_video_count, "#047857"),
+        ("남은 영상", remaining_video_count, "#7c3aed"),
+        ("미제출 과제", len(remaining_assignments), "#b45309"),
     ]
     card_html = "".join(
         '<td width="25%" style="padding:5px;vertical-align:top">'
@@ -794,10 +970,83 @@ def render_report_html(report: DailyReport) -> str:
             '확인이 끝나면 다음 메일에 최신 내용이 반영됩니다.</div></td></tr>'
         )
 
+    if video_progress:
+        progress_parts = []
+        for r in video_progress:
+            progress_parts.append(
+                '<div style="padding:14px 0;border-bottom:1px solid #e2e8f0">'
+                '<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>'
+                f'<td style="font-size:15px;font-weight:700;color:#0f172a">{esc(r["course_name"])}</td>'
+                f'<td align="right" style="font-size:13px;color:#475569"><strong>{r["done"]}/{r["available"]}개</strong> · {r["percent"]}%</td>'
+                '</tr></table>'
+                '<div style="height:8px;background:#e2e8f0;border-radius:999px;margin-top:10px;overflow:hidden">'
+                f'<div style="width:{r["percent"]}%;height:8px;background:#2563eb;border-radius:999px"></div></div>'
+                f'<div style="margin-top:7px;font-size:12px;color:#64748b">수강 완료 {r["done"]}개 · '
+                f'남음 {r["remaining"]}개 (수강 중 {r["in_progress"]} · 미수강 {r["not_started"]}) · '
+                f'학기 전체 {r["total"]}개 · 공개 예정 {r["upcoming"]}개</div></div>'
+            )
+        rows.append(
+            section(
+                "과목별 동영상 수강률",
+                "".join(progress_parts),
+                "수강률은 현재까지 공개된 출석 영상 기준이며, 학기 전체 확인 수와 공개 예정 수도 함께 표시합니다.",
+            )
+        )
+
+    lecture_parts = []
+    for r in report.attendance:
+        status = _video_term_status(r, report.target)
+        detail = f"진도 {r.get('progress_pct') or 0:g}%"
+        remaining = _video_remaining_minutes(r)
+        if status in {"수강 중", "미수강", "1회 재생 필요"} and remaining is not None:
+            detail += f" · 약 {remaining}분 남음"
+        if r.get("open_from") and status == "공개 예정":
+            detail += f" · 공개 {_format_datetime_ko(r['open_from'])}"
+        if r.get("open_to"):
+            detail += f" · 출석 인정 마감 {_format_datetime_ko(r['open_to'])}"
+        lecture_parts.append(
+            item(
+                r["title"],
+                f"{r['course_name']} · {r.get('section_name') or '주차 미표시'} · {status}",
+                detail,
+                r.get("url"),
+            )
+        )
+    rows.append(
+        section(
+            f"이번 학기 강의 목록 ({len(report.attendance)}개)",
+            "".join(lecture_parts) or '<div style="color:#64748b">확인된 동영상 강의가 없습니다.</div>',
+            "완료·수강 중·미수강·1회 재생·공개 예정 강의를 모두 표시합니다.",
+        )
+    )
+
+    assignment_parts = []
+    for r in report.semester_assignments:
+        status = _assignment_term_status(r, report.target)
+        detail = _deadline_summary(r) if r.get("due_at") or r.get("open_to") else "마감 시간 미표시"
+        if r.get("grading_status"):
+            detail += f" · 채점 {r['grading_status']}"
+        assignment_parts.append(
+            item(
+                r["title"],
+                f"{r['course_name']} · {status}",
+                detail,
+                r.get("url"),
+            )
+        )
+    rows.append(
+        section(
+            f"이번 학기 과제·제출 목록 ({len(report.semester_assignments)}개)",
+            "".join(assignment_parts) or '<div style="color:#64748b">확인된 제출 활동이 없습니다.</div>',
+            "제출 완료, 미제출, 공개 예정 상태를 학기 전체 기준으로 표시합니다.",
+        )
+    )
+
     todo_parts: list[str] = []
     todo_by_cmid = {r["cmid"]: r for r in report.todos}
-    for r in report.assignments:
-        todo_parts.append(item(r["title"], f"{r['course_name']} · 과제", _deadline_summary(r), r.get("url")))
+    for r in remaining_assignments:
+        detail = _deadline_summary(r) if r.get("due_at") or r.get("open_to") else "마감 시간 미표시"
+        todo_parts.append(item(r["title"], f"{r['course_name']} · 미제출 과제", detail, r.get("url")))
     for r in report.viewing_queue:
         todo = todo_by_cmid.get(r["cmid"], r)
         detail = f"현재 {r.get('progress_pct') or 0:g}%"
@@ -809,34 +1058,19 @@ def render_report_html(report: DailyReport) -> str:
         if todo.get("open_to"):
             detail += f" · {_deadline_summary(todo)}"
         todo_parts.append(item(r["title"], f"{r['course_name']} · 시청 대기", detail, r.get("url")))
-    used_ids = {r["cmid"] for r in report.assignments + report.viewing_queue}
+    used_ids = {r["cmid"] for r in remaining_assignments + report.viewing_queue}
     for r in report.today_schedule:
         if r["cmid"] not in used_ids:
             todo_parts.append(item(r["title"], f"{r['course_name']} · {r['schedule_kind']}", url=r.get("url")))
     if todo_parts:
-        rows.append(section("해야 할 일", "".join(todo_parts)))
+        rows.append(section("현재 남은 항목", "".join(todo_parts)))
     else:
         rows.append(
             section(
-                "해야 할 일",
-                '<div style="padding:8px 0;color:#475569;font-size:14px">현재 확인된 미제출 과제나 미수강 영상이 없습니다.</div>',
+                "현재 남은 항목",
+                '<div style="padding:8px 0;color:#475569;font-size:14px">현재 남은 미제출 과제나 수강 가능한 미완료 영상이 없습니다.</div>',
             )
         )
-
-    attendance_parts = []
-    for r in report.attendance:
-        status, color = _attendance_status(r)
-        attendance_parts.append(
-            '<div style="padding:14px 0;border-bottom:1px solid #e2e8f0">'
-            f'<div style="font-size:12px;color:#64748b">{esc(r["course_name"])}</div>'
-            f'<div style="font-size:15px;font-weight:700;color:#0f172a;margin-top:4px">{esc(r["title"])}</div>'
-            f'<div style="margin-top:7px;font-size:13px;color:#475569">마지막 재생 위치 '
-            f'{esc(r.get("max_position_label") or "-")} / 전체 {esc(r.get("duration_label") or "-")} · '
-            f'진도 {r.get("progress_pct") or 0:g}% · <strong style="color:{color}">{status}</strong></div>'
-            f'<div style="margin-top:8px;font-size:13px">{link(r.get("url"))}</div></div>'
-        )
-    if attendance_parts:
-        rows.append(section("동영상 수강 현황", "".join(attendance_parts), "진도율과 마지막 재생 위치를 함께 확인한 결과입니다."))
 
     completed_parts = [item(r["title"], f"{r['course_name']} · 영상 출석 완료", url=r.get("url")) for r in videos]
     completed_parts += [item(r["title"], f"{r['course_name']} · 과제 제출 완료", url=r.get("url")) for r in submissions]

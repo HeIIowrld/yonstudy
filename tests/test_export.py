@@ -37,6 +37,18 @@ class OneDriveExportTests(unittest.TestCase):
                 "restricted": 0,
             }
         )
+        self.store.save_activity(
+            {
+                "cmid": 11,
+                "course_id": 1,
+                "modname": "ubfile",
+                "title": "Lecture 1-2",
+                "section_idx": 1,
+                "section_name": "1주차",
+                "url": "https://example.test/resource/11",
+                "restricted": 0,
+            }
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -77,10 +89,13 @@ class OneDriveExportTests(unittest.TestCase):
         self.assertEqual(first.posts, 1)
         self.assertEqual(first.copied_files, 2)
         course_dir = Path(self.out.name) / "2026-2" / "TST1000_테스트과목"
-        for category in ("강의자료", "게시판_첨부", "QNA_공지"):
+        for category in ("게시판_첨부", "QNA_공지"):
             self.assertTrue((course_dir / category).is_dir())
+        self.assertFalse((course_dir / "강의자료").exists())
         files = [p for p in Path(self.out.name).rglob("*") if p.is_file()]
-        self.assertTrue(any(p.name.endswith("강의안.pdf") for p in files))
+        material = next(p for p in files if p.name.endswith("강의안__f1.pdf"))
+        self.assertEqual(material.parent, course_dir)
+        self.assertTrue(material.name.startswith("W01-L02__강의자료__"))
         post = next(p for p in files if p.suffix == ".md")
         self.assertIn("질문 본문", post.read_text(encoding="utf-8"))
 

@@ -160,8 +160,11 @@ def download(hls_url: str, out: Outputs, cmid: int = 0, timeout: int = 7200) -> 
     if out.video:
         out.video.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.video.with_suffix(out.video.suffix + ".part")
-        # 재인코딩 없이 그대로 담는다 — CPU를 거의 쓰지 않고 네트워크 속도로 끝난다.
-        cmd += ["-map", "0", "-c", "copy", "-f", "mp4", str(tmp)]
+        # 재인코딩 없이 영상·오디오만 담는다. HLS의 timed_id3 데이터 트랙은 MP4가
+        # 지원하지 않아 전체 스트림(-map 0)을 복사하면 헤더 생성 단계에서 실패한다.
+        cmd += [
+            "-map", "0:v", "-map", "0:a?", "-c", "copy", "-f", "mp4", str(tmp),
+        ]
         temps.append((tmp, out.video))
 
     try:

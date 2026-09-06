@@ -92,6 +92,57 @@ class AutoplayPlanTests(unittest.TestCase):
             [20],
         )
 
+    def test_future_video_is_not_selected(self):
+        self.add_vod(
+            30,
+            1,
+            "2026-11-10 00:00:00",
+            "2026-11-16 23:59:59",
+        )
+        now = datetime(2026, 9, 3, 9, 0)
+        self.assertEqual(build_plan(self.store, now=now), [])
+
+    def test_untracked_video_is_played_once_and_recorded_locally(self):
+        self.store.save_activity(
+            {
+                "cmid": 40,
+                "course_id": 1,
+                "modname": "vod",
+                "title": "진도 표시 없는 강의",
+                "url": "https://example.test/vod/40",
+                "completion": None,
+                "open_from": None,
+                "open_to": None,
+                "restricted": 0,
+            }
+        )
+        self.store.save_vod(
+            {
+                "cmid": 40,
+                "course_id": 1,
+                "duration_sec": 600,
+                "watched_sec": None,
+                "progress_pct": None,
+                "is_progress": 0,
+                "can_log_progress": 0,
+                "max_rate": 2.0,
+                "status": "ok",
+            }
+        )
+        self.store.commit()
+
+        self.assertEqual(build_plan(self.store), [])
+        plan = build_plan(self.store, include_untracked_once=True)
+        self.assertEqual([job.cmid for job in plan], [40])
+        self.assertFalse(plan[0].tracks_progress)
+
+        self.store.log("playback_once", "40", True, "ended")
+        self.store.commit()
+        self.assertEqual(
+            build_plan(self.store, include_untracked_once=True),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

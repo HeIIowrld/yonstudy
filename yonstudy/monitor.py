@@ -27,7 +27,11 @@ def attendance_snapshot(store, *, year: str, semester: str) -> list[dict]:
         """
         SELECT c.course_id,c.name AS course_name,a.cmid,a.title,a.section_idx,
                a.section_name,a.url,a.open_from,a.open_to,a.late_until,a.completion,
-               v.duration_sec,v.watched_sec,v.progress_pct,v.probed_at
+               v.duration_sec,v.watched_sec,v.progress_pct,v.is_progress,v.probed_at,
+               EXISTS(
+                   SELECT 1 FROM crawl_log l
+                    WHERE l.kind='playback_once' AND l.ref=CAST(v.cmid AS TEXT) AND l.ok=1
+               ) AS played_once
           FROM activity a JOIN course c ON c.course_id=a.course_id
           JOIN vod v ON v.cmid=a.cmid
          WHERE c.year=? AND c.semester=? AND a.modname='vod'
@@ -40,10 +44,15 @@ def attendance_snapshot(store, *, year: str, semester: str) -> list[dict]:
         row = dict(source)
         duration = row.get("duration_sec")
         watched = row.get("watched_sec")
-        progress_ok = (row.get("progress_pct") or 0) >= 100
-        position_ok = bool(
-            duration is not None and watched is not None and watched >= max(0, duration - 2)
-        )
+        if row.get("is_progress") == 0:
+            progress_ok = bool(row.get("played_once"))
+            position_ok = bool(row.get("played_once"))
+        else:
+            progress_ok = (row.get("progress_pct") or 0) >= 100
+            position_ok = bool(
+                duration is not None and watched is not None
+                and watched >= max(0, duration - 2)
+            )
         row.update(
             duration_label=_seconds_label(duration),
             max_position_label=_seconds_label(watched),
@@ -62,6 +71,8 @@ def viewing_queue(store, *, year: str, semester: str, now: datetime | None = Non
     rows = attendance_snapshot(store, year=year, semester=semester)
     queue = []
     for row in rows:
+        if row.get("is_progress") == 0:
+            continue
         if row["verified"] or row.get("completion") == "y":
             continue
         opens = row.get("open_from")

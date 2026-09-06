@@ -132,5 +132,11 @@ c.ajax = function(state, from, to){
 - Week 1 -1: 56:40 재생 후 진도 100%, 완료 체크 `y`
 - Week 1-2: 47:14 재생 후 진도 100%, 완료 체크 `y`
 
-`yonstudy-watch.timer`는 매일 10시·15시·20시 KST 기준 최대 40분 지터를 두고
-한 번에 한 편씩 실행한다. `watch_state.json`에 마지막 실행과 검증 결과를 남긴다.
+`yonstudy-watch.timer`는 매일 새벽 02:30·04:00·05:30 KST 기준 최대 10분 지터를 두고
+한 번에 한 편씩 실행한다. 02:00 읽기 전용 모니터가 새 영상을 먼저 동기화하며, 낮 시간에
+누락 실행되지 않도록 persistent catch-up은 사용하지 않는다. `watch_state.json`에 마지막
+실행과 검증 결과를 남긴다.
+
+`is_progress=false`라 진도율·완료 체크가 없는 영상도 공개 후 실제로 끝까지 한 번 재생한다.
+이 경우 LearnUs 진도 대신 로컬 `crawl_log`의 `playback_once` 성공 기록으로 완주를 확인하며,
+성공 기록이 있는 영상은 다음 계획에서 제외한다.
