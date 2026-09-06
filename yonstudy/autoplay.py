@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Callable
 from zoneinfo import ZoneInfo
+from random import random
 
 VIEWER = "https://ys.learnus.org/mod/vod/viewer.php?id={cmid}"
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -68,34 +69,61 @@ def build_plan(
 ) -> list[Job]:
     """지금 재생해야 하는 영상을 골라 우선순위대로 정렬한다.
 
+    정렬 기준:
+    1. 긴급도
+    2. 같은 긴급도 내 과목 순서 랜덤
+    3. 같은 과목 내 마감순
+    4. 남은 재생 시간이 긴 순
+
     진도 추적 영상은 100% 미만이면서 현재 진도처리기간인 경우만 고른다.
-    ``include_untracked_once``를 켜면 진도율·완료 체크가 없는 영상도 공개 후 한 번
-    완주 대상으로 넣는다. 성공 기록은 ``crawl_log(kind='playback_once')``로 판정한다.
+    ``include_untracked_once``를 켜면 진도율·완료 체크가 없는 영상도 공개 후
+    한 번 완주 대상으로 넣는다.
+
+    성공 기록은 ``crawl_log(kind='playback_once')``로 판정한다.
     """
     if now is None:
         now = datetime.now(SEOUL).replace(tzinfo=None)
     elif now.tzinfo is not None:
         now = now.astimezone(SEOUL).replace(tzinfo=None)
+
     course_clause = ""
     params: tuple = ()
+
     if course_ids is not None:
         if not course_ids:
             return []
-        course_clause = f" AND v.course_id IN ({','.join('?' * len(course_ids))})"
+
+        placeholders = ",".join("?" for _ in course_ids)
+        course_clause = f" AND v.course_id IN ({placeholders})"
         params = tuple(sorted(course_ids))
+
     rows = store.query(
         f"""
-        SELECT v.cmid, v.course_id, v.duration_sec, v.watched_sec, v.progress_pct,
-               v.can_log_progress, v.max_rate, v.is_progress, v.status,
-               a.title, a.open_from, a.open_to, a.late_until,
-               c.name AS course_name,
-               EXISTS(
-                   SELECT 1 FROM crawl_log l
-                    WHERE l.kind='playback_once' AND l.ref=CAST(v.cmid AS TEXT) AND l.ok=1
-               ) AS played_once
+        SELECT
+            v.cmid,
+            v.course_id,
+            v.duration_sec,
+            v.watched_sec,
+            v.progress_pct,
+            v.can_log_progress,
+            v.max_rate,
+            v.is_progress,
+            v.status,
+            a.title,
+            a.open_from,
+            a.open_to,
+            a.late_until,
+            c.name AS course_name,
+            EXISTS(
+                SELECT 1
+                  FROM crawl_log l
+                 WHERE l.kind = 'playback_once'
+                   AND l.ref = CAST(v.cmid AS TEXT)
+                   AND l.ok = 1
+            ) AS played_once
           FROM vod v
           JOIN activity a ON a.cmid = v.cmid
-          JOIN course   c ON c.course_id = v.course_id
+          JOIN course c ON c.course_id = v.course_id
          WHERE COALESCE(v.progress_pct, 0) < 100
          {course_clause}
         """,
@@ -103,64 +131,127 @@ def build_plan(
     )
 
     jobs: list[Job] = []
-    for r in rows:
-        duration = r["duration_sec"] or 0
+
+    for row in rows:
+        duration = row["duration_sec"] or 0
         if duration <= 0:
             continue
 
-        start = _dt(r["open_from"])
-        end = _dt((r["late_until"] if include_late else None) or r["open_to"])
-        in_calendar = (not start or start <= now) and (not end or now <= end)
-        tracks_progress = r["is_progress"] != 0
+        start = _dt(row["open_from"])
+        end = _dt(
+            (
+                row["late_until"]
+                if include_late
+                else None
+            )
+            or row["open_to"]
+        )
+
+        in_calendar = (
+            (start is None or start <= now)
+            and (end is None or now <= end)
+        )
+
+        tracks_progress = row["is_progress"] != 0
+
         if not tracks_progress:
-            # 완료 신호가 없는 영상은 뷰어가 실제로 열리고, 아직 로컬 완주 기록이
-            # 없으며, 공개일이 지난 경우 한 번만 재생한다. 마감 표시는 없는 경우가 많다.
+            # 진도 추적이 없는 영상은 공개 후 한 번만 재생한다.
             if (
                 not include_untracked_once
-                or r["status"] != "ok"
-                or bool(r["played_once"])
+                or row["status"] != "ok"
+                or bool(row["played_once"])
                 or (start is not None and start > now)
             ):
                 continue
+
             open_now = True
-        # 뷰어의 판정과 화면의 정상 수강기간을 함께 만족해야 한다. 기간 표기가
-        # 아예 없는 강좌만 뷰어 판정에 전적으로 의존한다. 기본값은 지각기간 제외다.
-        elif r["can_log_progress"] is not None:
-            open_now = bool(r["can_log_progress"]) and in_calendar
-        elif start and end:
+
+        elif row["can_log_progress"] is not None:
+            # 뷰어 판정과 정상 수강기간을 모두 만족해야 한다.
+            open_now = (
+                bool(row["can_log_progress"])
+                and in_calendar
+            )
+
+        elif start is not None and end is not None:
             open_now = start <= now <= end
+
         else:
             open_now = False
+
         if not open_now:
             continue
 
-        rate = min(float(r["max_rate"] or 1.0), max_rate_cap)
+        rate = min(
+            float(row["max_rate"] or 1.0),
+            max_rate_cap,
+        )
+
         if not tracks_progress:
-            urgency, deadline = "1회 재생", None
+            urgency = "1회 재생"
+            deadline = None
+
         elif end is None:
-            urgency, deadline = "상시", None
+            urgency = "상시"
+            deadline = None
+
         else:
-            left = end - now
+            time_left = end - now
             deadline = end
-            urgency = (
-                "긴급" if left < timedelta(days=1)
-                else "임박" if left < timedelta(days=3)
-                else "여유"
-            )
+
+            if time_left < timedelta(days=1):
+                urgency = "긴급"
+            elif time_left < timedelta(days=3):
+                urgency = "임박"
+            else:
+                urgency = "여유"
+
         jobs.append(
             Job(
-                cmid=r["cmid"], course_id=r["course_id"],
-                course_name=r["course_name"], title=r["title"],
-                duration_sec=duration, watched_sec=r["watched_sec"] or 0,
-                open_from=r["open_from"], open_to=r["open_to"],
-                late_until=r["late_until"], rate=rate,
-                urgency=urgency, deadline=deadline,
+                cmid=row["cmid"],
+                course_id=row["course_id"],
+                course_name=row["course_name"],
+                title=row["title"],
+                duration_sec=duration,
+                watched_sec=row["watched_sec"] or 0,
+                open_from=row["open_from"],
+                open_to=row["open_to"],
+                late_until=row["late_until"],
+                rate=rate,
+                urgency=urgency,
+                deadline=deadline,
                 tracks_progress=tracks_progress,
             )
         )
 
-    order = {"긴급": 0, "임박": 1, "여유": 2, "상시": 3, "1회 재생": 4}
-    jobs.sort(key=lambda j: (order[j.urgency], j.deadline or datetime.max, -j.remaining_sec))
+    urgency_order = {
+        "긴급": 0,
+        "임박": 1,
+        "여유": 2,
+        "상시": 3,
+        "1회 재생": 4,
+    }
+
+    # 같은 긴급도에 속한 과목마다 랜덤 순위를 하나씩 부여한다.
+    course_keys = {
+        (job.urgency, job.course_id)
+        for job in jobs
+    }
+
+    course_random_rank = {
+        key: random()
+        for key in course_keys
+    }
+
+    jobs.sort(
+        key=lambda job: (
+            urgency_order[job.urgency],
+            course_random_rank[(job.urgency, job.course_id)],
+            job.deadline or datetime.max,
+            -job.remaining_sec,
+        )
+    )
+
     return jobs
 
 
