@@ -1,0 +1,11 @@
+[Unit]
+Description=Check new LearnUs VOD and attendance at 02:00 KST
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=1m
+Unit=yonstudy-monitor.service
+
+[Install]
+WantedBy=timers.target

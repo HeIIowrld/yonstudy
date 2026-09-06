@@ -34,7 +34,7 @@ DEFAULT_EXPORT = os.environ.get(
 )
 DEFAULT_REMOTE = os.environ.get(
     "YONSTUDY_REMOTE",
-    os.environ.get("YONSTUDY_ONEDRIVE_REMOTE", "yonstudy-onedrive:yonstudy"),
+    os.environ.get("YONSTUDY_ONEDRIVE_REMOTE", "remote:yonstudy"),
 )
 
 

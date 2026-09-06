@@ -1,0 +1,11 @@
+[Unit]
+Description=Send the LearnUs daily report at 09:00 KST
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=1m
+Unit=yonstudy-report.service
+
+[Install]
+WantedBy=timers.target

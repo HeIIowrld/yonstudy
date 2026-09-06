@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh the LearnUs session every two hours
+
+[Timer]
+OnCalendar=*-*-* 00/2:25:00 Asia/Seoul
+Persistent=true
+RandomizedDelaySec=5m
+AccuracySec=1m
+Unit=yonstudy-keepalive.service
+
+[Install]
+WantedBy=timers.target

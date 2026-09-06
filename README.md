@@ -1,39 +1,71 @@
 # yonstudy
 
-LearnUs에 흩어져 있는 강의자료, 게시글, 제출 현황, 동영상 진도를 로컬
-SQLite에 모아 보는 명령행 도구다. 학기가 지난 뒤 자료를 찾을 때마다 강의실을
-하나씩 열어 보는 게 번거로워서 만들었다.
+LearnUs의 강좌 정보, 강의자료, 게시글, 제출 현황과 VOD 진도를 한곳에 모아 두는
+명령행 도구다. 필요한 학기만 골라 수집하고, 결과를 일반 폴더로 내보내거나 Synology,
+SFTP, WebDAV, OneDrive 같은 rclone 저장소에 증분 업로드할 수 있다.
 
-아카이브는 중간에 끊겨도 다시 실행하면 이어서 진행한다. 수집한 파일은 로컬에
-남겨도 되고, rclone을 통해 OneDrive, SMB, SFTP, WebDAV 저장소로 바로 보낼 수도
-있다. Synology NAS는 SMB, SFTP, WebDAV 중 NAS에서 켜 둔 프로토콜을 사용하면 된다.
+## 기능 한눈에 보기
 
-## 주요 기능
+| 할 일 | 명령 | 결과 |
+|---|---|---|
+| 로그인 | `login` | 다음 명령에서 재사용할 쿠키 저장 |
+| 강좌 목록 갱신 | `courses` | 연도, 학기, 강좌 ID 출력 |
+| 자료 수집 | `archive` | SQLite, 첨부파일, 게시글, 자막 저장 |
+| 수집 현황 확인 | `status` | 강좌·활동·파일·진도 개수 출력 |
+| 오늘 할 일 확인 | `report` | 공개 자료, 과제, 게시글, 미수강 영상 정리 |
+| 로컬 폴더 만들기 | `export` | 학기/과목별 일반 파일 트리 생성 |
+| NAS·클라우드 업로드 | `upload` | rclone remote에 증분 업로드 |
+| 일일 작업 한 번에 실행 | `automate` | 현재 학기 수집, 업로드, 리포트 생성 |
+| VOD·출석부만 확인 | `monitor` | 영상을 재생하지 않고 시청 순서 갱신 |
+| 재생 대상 확인/실행 | `plan`, `watch` | 현재 학기 미완료 영상 재생 및 진도 재확인 |
+| 영상 파생 파일 만들기 | `download` | 오디오, 슬라이드 프레임, 선택적으로 MP4 생성 |
+| 강의안과 자막 연결 | `analyze` | PDF 페이지와 자막 구간을 정렬한 리포트 생성 |
 
-- 강좌, 활동, 첨부파일, 게시판·포럼 글 증분 수집
-- VOD 재생 정보와 온라인 출석부 진도 확인
-- 오늘 공개된 자료, 남은 과제, 미수강 영상을 묶은 일일 리포트
-- 강의 자료와 게시글을 학기/과목 구조로 내보내기
-- rclone remote로 로컬 staging 없이 업로드
-- 선택 기능: 오디오 추출, 자막과 강의안 정렬, 브라우저 재생
+Python 3.10 이상을 사용한다. 기본 수집과 리포트는 Python 표준 라이브러리만으로
+동작하고, 영상 및 PDF 기능은 필요한 패키지만 추가하면 된다.
 
-코어 기능은 Python 표준 라이브러리만 사용한다. Python 3.10 이상과 Linux에서 주로
-개발했다.
-
-## 설치
+## 빠른 시작
 
 ```bash
 git clone https://github.com/HeIIowrld/yonstudy.git
 cd yonstudy
+
 python3 -m venv .venv
 . .venv/bin/activate
+
+python cli.py login
+python cli.py courses
+python cli.py archive --year 2026 --semester 2학기
+python cli.py status
 ```
 
-일반 아카이빙은 추가 Python 패키지 없이 돌아간다. 아래 항목은 필요한 기능만 설치하면
-된다.
+`login`은 터미널에서 학번과 비밀번호를 받고 로그인 쿠키를 저장한다. 이후 명령은 같은
+쿠키를 사용한다. 세션을 다시 만들 때는 `python cli.py login`을 다시 실행하면 된다.
+
+기본 저장 위치는 저장소 안의 `store/`다. 다른 위치를 쓰려면 실행 전에 환경변수를
+설정한다.
 
 ```bash
-# 오디오·영상 추출
+export YONSTUDY_STORE="$PWD/store"
+export LEARNUS_COOKIES="$PWD/store/learnus-cookies.txt"
+```
+
+전역 옵션은 하위 명령보다 앞에 둔다.
+
+```bash
+python cli.py --store /data/yonstudy archive --year 2026
+python cli.py --interval 0.7 --per-minute 30 courses
+```
+
+## 선택 설치 항목
+
+아래 기능을 쓸 때만 설치하면 된다.
+
+```bash
+# NAS·클라우드 업로드
+sudo apt install rclone
+
+# 오디오, 슬라이드 프레임, MP4 생성
 sudo apt install ffmpeg
 
 # PDF 강의안 분석
@@ -42,116 +74,171 @@ python -m pip install pypdf
 # 로컬 음성 전사
 python -m pip install faster-whisper
 
-# 실제 브라우저 재생
+# VOD 브라우저 재생
 python -m pip install playwright
 python -m playwright install chromium
 ```
 
-저장 경로를 먼저 지정해 두면 다른 계정이나 설치 경로에서도 코드를 고칠 필요가 없다.
+Chrome을 직접 사용하려면 다음 값도 지정할 수 있다.
 
 ```bash
-export YONSTUDY_STORE="$PWD/store"
-export LEARNUS_COOKIES="$PWD/store/learnus-cookies.txt"
+export YONSTUDY_BROWSER_CHANNEL=chrome
 ```
 
-`store/`, 쿠키, `.env` 파일은 Git에 올라가지 않도록 `.gitignore`에 등록되어 있다.
-
-## 처음 실행
+## 로그인과 기본 상태 확인
 
 ```bash
-python cli.py login
-python cli.py courses
-python cli.py archive --year 2026
-python cli.py status
+python cli.py login       # 로그인 쿠키 생성 또는 갱신
+python cli.py keepalive   # 현재 세션 확인 및 유휴 시간 연장
+python cli.py courses     # 강좌 ID와 학기 확인
+python cli.py status      # 지금까지 수집한 데이터 요약
 ```
 
-`login`은 비밀번호를 터미널에서만 받고 파일에 쓰지 않는다. 대신 로그인 쿠키를
-저장하며 파일 권한은 600으로 설정한다. 세션이 만료되면 `login`을 다시 실행하면
-된다.
+백그라운드 실행에서 세션 만료 시 자동 로그인이 필요하면 `LEARNUS_ID`, `LEARNUS_PW`를
+서비스 환경 파일에 설정한다. 설정하지 않으면 저장된 쿠키만 사용한다.
 
-자주 쓰는 명령은 다음과 같다.
+## 강좌 자료 수집
+
+`archive`는 기본적으로 다음 항목을 수집한다.
+
+- 강좌와 주차별 활동 메타데이터
+- 강의자료, 게시판 첨부, 본인 제출 파일
+- 게시판·포럼 글과 본문
+- VOD 주소, 재생 가능 기간, 온라인 출석 진도
+- LearnUs에서 제공하는 자막
+
+영상 MP4 본체는 `archive`가 받지 않는다. MP4가 필요하면 `download --video` 또는
+`archive-only`를 사용한다.
 
 ```bash
-python cli.py archive --course 285311       # 특정 강좌만 수집
-python cli.py report --sync                  # 이번 학기 상태를 갱신한 뒤 리포트
-python cli.py export --dry-run               # 로컬 내보내기 계획
-python cli.py monitor                        # 재생 없이 VOD와 출석부 갱신
-python cli.py download --limit 10            # 오디오와 슬라이드 프레임 추출
-python cli.py analyze --cmid 4333924         # 강의안과 자막 정렬
+# 모든 강좌
+python cli.py archive
+
+# 특정 연도와 학기
+python cli.py archive --year 2026 --semester 1학기
+
+# 여러 연도·학기를 한 번에 선택
+python cli.py archive --year 2025 2026 --semester 2학기 겨울계절수업
+
+# courses에서 확인한 강좌 ID로 선택
+python cli.py archive --course 285311 291204
+
+# 최근 정렬 결과에서 강좌 3개만 처리
+python cli.py archive --limit 3
 ```
 
-전체 옵션은 `python cli.py <명령> --help`로 확인할 수 있다.
+수집 범위는 다음 옵션으로 조절한다.
 
-## 원격 저장소 연결
+| 옵션 | 꺼지는 기능 |
+|---|---|
+| `--no-vod` | VOD 뷰어 및 재생 정보 조회 |
+| `--no-subtitles` | 자막 수집 |
+| `--no-files` | 강의자료, 첨부파일, 제출 파일 다운로드 |
+| `--no-boards` | 게시판·포럼 목록과 본문 수집 |
+| `--board-pages 1` | 게시판별 첫 페이지만 조회 |
+| `--board-pages 0` | 페이지 제한 없이 전체 게시글 조회 |
 
-업로드 코드는 특정 서비스 API를 직접 사용하지 않고 rclone remote를 사용한다. 현재
-사용하는 `lsjson`, `rcat`, `copyto`, `moveto`는 OneDrive, SMB, SFTP, WebDAV 백엔드에서
-모두 제공되는 공통 명령이다.
-
-먼저 rclone을 설치하고 remote 하나를 만든다.
+예를 들어 메타데이터와 게시글만 빠르게 갱신하려면 다음처럼 실행한다.
 
 ```bash
-sudo apt install rclone
-rclone version
+python cli.py archive --year 2026 --no-vod --no-subtitles --no-files
+```
+
+같은 명령을 다시 실행하면 저장된 항목을 확인한 뒤 새 항목과 변경된 항목만 처리한다.
+
+## 리포트
+
+`report`는 오늘 공개된 자료, 새 게시글, 제출 완료 상태, 남은 과제와 미수강 영상을
+현재 학기 기준으로 정리한다.
+
+```bash
+python cli.py report                         # 저장된 DB로 출력
+python cli.py report --sync                  # 먼저 현재 학기를 가볍게 갱신
+python cli.py report --sync-if-stale         # 오늘 동기화 기록이 없을 때만 갱신
+python cli.py report --days 21               # 앞으로 21일 일정 표시
+python cli.py report --json                  # JSON 출력
+python cli.py report --output report.txt     # 파일로도 저장
+python cli.py report --date 2026-09-06       # 기준 날짜 지정
+```
+
+메일을 켜려면 수신자와 SMTP 값을 설정한다.
+
+```bash
+export YONSTUDY_REPORT_TO='me@example.com'
+export YONSTUDY_MAIL_FROM='me@example.com'
+export YONSTUDY_SMTP_HOST='smtp.example.com'
+export YONSTUDY_SMTP_PORT='587'
+export YONSTUDY_SMTP_STARTTLS='1'
+export YONSTUDY_SMTP_USER='me@example.com'
+export YONSTUDY_SMTP_PASSWORD='앱 비밀번호'
+
+python cli.py report --sync --email-to me@example.com
+```
+
+SMTP를 사용하지 않으면 관련 환경변수를 두지 않는다. `--email-if-configured`는 메일
+설정이 있을 때만 발송하고, 없으면 화면 및 파일 리포트만 만든다.
+
+## 로컬 폴더로 내보내기
+
+SQLite와 blob 대신 탐색기에서 바로 볼 수 있는 파일 구조가 필요할 때 `export`를 쓴다.
+
+```bash
+python cli.py export --dry-run
+python cli.py export --destination /data/LearnUs --year 2026 --semester 2학기
+```
+
+`--dry-run`은 복사할 개수와 용량만 계산한다. 실제 내보내기는 기존 파일을 지우지 않고
+변경된 파일만 복사하며, 루트에 `yonstudy-manifest.json`을 만든다. 기본 경로는
+`exports/archive/`이고 `YONSTUDY_EXPORT_DIR`로 바꿀 수 있다.
+
+## Synology와 원격 저장소
+
+원격 업로드는 rclone remote를 사용한다. Synology에서는 SMB, SFTP, WebDAV 중 하나를
+선택할 수 있다.
+
+| 연결 방식 | rclone 백엔드 | 필요한 값 | remote 경로 예시 |
+|---|---|---|---|
+| Synology 공유 폴더 | `smb` | NAS 주소, 사용자, 비밀번호 | `nas:home/yonstudy` |
+| Synology SSH | `sftp` | NAS 주소, 사용자, SSH 키 또는 비밀번호 | `nas-sftp:/volume1/archive/yonstudy` |
+| Synology WebDAV | `webdav` | WebDAV URL, 사용자, 비밀번호 | `nas-webdav:yonstudy` |
+| Microsoft OneDrive | `onedrive` | Microsoft 로그인 승인 | `cloud:yonstudy` |
+
+DSM에서 사용할 파일 서비스를 켠 뒤 rclone remote를 만든다.
+
+```bash
 rclone config
 rclone listremotes
-rclone lsd <remote>:
+rclone lsd nas:
 ```
 
-SMB 백엔드는 rclone 1.60부터 들어 있으므로 그보다 오래된 버전이면
-[rclone 공식 설치 안내](https://rclone.org/install/)에 따라 새 버전을 설치한다.
+SMB remote에서는 콜론 다음 첫 디렉터리가 공유 이름이다. 예를 들어 `home` 공유 아래
+`archive/yonstudy`에 저장하려면 `nas:home/archive/yonstudy`를 지정한다. rclone 설정값과
+백엔드별 추가 옵션은 [SMB](https://rclone.org/smb/),
+[SFTP](https://rclone.org/sftp/), [WebDAV](https://rclone.org/webdav/) 문서에서 확인할 수 있다.
 
-연결 형태에 따라 `rclone config`에서 아래 저장소를 고르면 된다.
-
-| 사용처 | rclone 백엔드 | remote 경로 예시 | 메모 |
-|---|---|---|---|
-| OneDrive | `onedrive` | `onedrive:yonstudy` | 처음 한 번 Microsoft 로그인 승인 필요 |
-| Synology/Windows 공유 | `smb` | `nas:home/yonstudy` | 첫 경로 요소는 SMB 공유 이름 |
-| Synology/Linux 서버 | `sftp` | `nas-sftp:/volume1/archive/yonstudy` | 비밀번호보다 SSH 키 권장 |
-| Synology/Nextcloud 등 | `webdav` | `nas-webdav:yonstudy` | HTTPS URL 사용 권장 |
-
-설정할 때 필요한 값은 많지 않다. SMB는 서버 주소, 사용자, 비밀번호와 공유 이름이
-필요하고 기본 포트는 445다. SFTP는 서버 주소, 사용자, SSH 키 경로가 기본이며 포트는
-22다. WebDAV는 HTTPS URL, 사용자, 비밀번호를 넣고 일반 서버라면 vendor를 `other`로
-고르면 된다. 비밀번호는 셸 명령 인자로 넘기지 말고 `rclone config` 안에서 입력한다.
-
-Synology에서는 DSM의 파일 서비스(SMB/SFTP) 또는 WebDAV Server 패키지 중 하나를 먼저
-켜야 한다. 접속 계정은 백업용 공유 폴더에만 쓰기 권한을 주는 편이 안전하다.
-WebDAV는 가능하면 HTTP 대신 HTTPS를 사용한다.
-SFTP는 `known_hosts_file`을 지정해 서버 키를 확인하는 편이 좋다. Synology SFTP에서
-해시 계산 경로 오류가 나면 [rclone SFTP 안내](https://rclone.org/sftp/)의
-`path_override` 또는 `disable_hashcheck` 설정을 확인한다.
-
-연결을 확인했으면 yonstudy에 remote를 넘긴다.
+yonstudy가 사용할 위치를 환경변수로 연결한다.
 
 ```bash
-export YONSTUDY_REMOTE='nas:home/yonstudy'
+export YONSTUDY_REMOTE='nas:home/archive/yonstudy'
 
-# 업로드 대상 개수만 확인. remote에 접속하지 않음
+# DB 기준 대상 개수 확인
 python cli.py upload --dry-run --year 2026 --semester 2학기
 
-# 이미 수집한 로컬 자료와 게시글 업로드
+# 실제 업로드
 python cli.py upload --year 2026 --semester 2학기
-
-# 현재 학기 수집, 업로드, 리포트를 한 번에 실행
-python cli.py automate --no-mail
 ```
 
-`upload` 결과의 `missing_sources`가 0보다 크면 로컬 blob이 없는 항목이다. 예전에
-다른 remote로 바로 보낸 자료일 수 있으므로 `archive`로 원본을 다시 받은 뒤
-`upload`를 한 번 더 실행한다.
+환경변수 대신 명령마다 remote를 넘겨도 된다.
 
-`--remote nas:home/yonstudy`처럼 명령행에서 바로 지정해도 된다. 예전 설정과의 호환을
-위해 `YONSTUDY_ONEDRIVE_REMOTE`, `--no-onedrive`, `export-onedrive` 이름도 계속 받지만,
-새 설정에서는 `YONSTUDY_REMOTE`, `--no-upload`, `export`를 쓰는 것을 권장한다.
+```bash
+python cli.py upload \
+  --remote 'nas:home/archive/yonstudy' \
+  --year 2026 --semester 2학기
+```
 
-rclone은 설정 파일의 비밀번호를 단순히 가려서 저장하며 강하게 암호화하지는 않는다.
-`rclone.conf`의 권한을 600으로 유지하고, 여러 사용자가 같이 쓰는 서버에서는 계정별
-설정 파일을 분리하는 것이 좋다.
-
-## 저장 구조와 동기화 방식
-
-원격에는 다음과 같은 구조로 저장된다.
+업로드는 학기와 과목 폴더를 만들고 자료, 첨부파일, 게시글 Markdown을 저장한다. 같은
+경로에 같은 크기의 파일이 있으면 건너뛰며 원격 파일은 자동으로 삭제하지 않는다.
+`missing_sources`가 있으면 `archive`를 다시 실행해 로컬 원본을 채운 뒤 업로드한다.
 
 ```text
 2026-2/AIC2120_인공지능개론및응용/
@@ -163,92 +250,206 @@ rclone은 설정 파일의 비밀번호를 단순히 가려서 저장하며 강�
   제출물/
 ```
 
-학기 코드는 `1학기=1`, `2학기=2`, `여름계절수업=S`, `겨울계절수업=W`다. 파일명은
-Windows의 금지 문자와 경로 길이를 고려해 정리한다. 제목이 같은 파일도 겹치지 않도록
-LearnUs의 고정 ID를 파일명 끝에 붙인다.
+학기 폴더는 `1학기=1`, `2학기=2`, `여름계절수업=S`, `겨울계절수업=W` 형식을 쓴다.
 
-`제출물/`에는 본인이 낸 파일이 들어갈 수 있다. 이름, 학번, 과제 내용 같은 개인정보가
-섞일 수 있으므로 remote를 공개 공유 폴더로 두면 안 된다.
+## 일일 자동화
 
-업로드는 증분 방식이며 원격 파일을 지우지 않는다. 같은 경로에 같은 크기의 파일이
-있으면 올리지 않는다. 파일이 변경됐는데 크기가 우연히 같은 특수한 경우에는 rclone으로
-해당 원격 파일을 지운 뒤 다시 실행해야 한다.
+`automate`는 현재 학기를 대상으로 아래 순서대로 동작한다.
 
-원격 저장소가 응답하지 않으면 로컬로 몰래 대체 저장하지 않고 실패 상태를 남긴다.
-다음 실행에서 다시 받거나 업로드한다. 실행 결과는 `store/automation_state.json`,
-수동 플레이백 상태는 `store/watch_state.json`에서 확인할 수 있다.
-
-`automate`는 진도 추적이 꺼진 VOD 원본도 한 번에 최대 4편까지 remote에 보관한다.
-`YONSTUDY_ARCHIVE_ONLY_LIMIT`로 수량을 바꿀 수 있으며, 따로 실행하려면
-`python cli.py archive-only --remote <remote>:경로`를 사용한다.
-
-## 리포트 메일
-
-`report`는 한국 시간을 기준으로 오늘 공개된 활동, 새 게시글, 완료된 제출, 남은
-과제와 영상을 보여 준다. SMTP 정보가 있으면 메일로도 보낼 수 있다.
-
-```bash
-export YONSTUDY_REPORT_TO='me@example.com'
-export YONSTUDY_MAIL_FROM='me@example.com'
-export YONSTUDY_SMTP_HOST='smtp.example.com'
-export YONSTUDY_SMTP_PORT='587'
-export YONSTUDY_SMTP_USER='me@example.com'
-export YONSTUDY_SMTP_PASSWORD='앱 비밀번호'
-python cli.py report --sync
-```
-
-SMTP 비밀번호는 DB에 저장하지 않는다. 정기 실행에서는 일반 사용자가 읽을 수 없는
-환경 파일에 넣는다. [systemd/yonstudy.env.example](systemd/yonstudy.env.example)을
-복사해 시작해도 된다. SMTP 설정이 없으면 `/usr/sbin/sendmail`을 찾아 사용한다.
-
-## 자동 실행
-
-`systemd/`의 서비스 파일은 이 저장소가 `/root/yonstudy`에 설치된 서버용 예시다. 그대로
-복사하기 전에 `WorkingDirectory`, `ExecStart`, `ReadWritePaths`, `Documentation`을 실제 설치
-경로에 맞게 고쳐야 한다. rclone 설정 파일 경로도 서비스 실행 계정을 기준으로 확인한다.
-
-`automate`는 현재 학기 동기화, 원격 업로드, 리포트 생성을 묶어서 실행한다.
+1. 로그인 세션 확인
+2. 강좌, 활동, VOD 진도, 자료와 게시글 동기화
+3. 새 파일과 게시글을 rclone remote에 업로드
+4. 진도를 추적하지 않는 VOD를 최대 4편까지 remote에 보관
+5. 텍스트 리포트 생성
+6. 메일 설정이 있으면 리포트 발송
 
 ```bash
 python cli.py automate --dry-run
-python cli.py automate --no-mail
-python cli.py automate --no-upload   # 메타데이터와 게시글만 갱신
+python cli.py automate
 ```
 
-## 자동 재생에 대해
+단계별 스위치는 다음과 같다.
 
-`watch` 및 `scheduled-watch`는 Playwright로 영상을 실제 재생한다. 서버의 진도 API를 직접
-조작하지는 않지만, 자동 재생 자체가 수업 또는 학교 규정에 어긋날 수 있다. 관련 규정을
-확인하고 본인 계정에서만 사용해야 한다. 처음에는 반드시 계획만 확인한다.
+| 옵션 | 동작 |
+|---|---|
+| `--no-sync` | LearnUs 갱신 없이 현재 DB 내용으로 업로드와 리포트 실행 |
+| `--no-upload` | 자료 업로드와 비추적 VOD 보관을 끄고 리포트만 생성 |
+| `--no-mail` | 메일 발송을 끄고 `store/reports/`에 리포트만 저장 |
+| `--dry-run` | 로그인, 다운로드, 업로드, 파일 기록 없이 실행 계획 출력 |
+| `--remote <remote>:<path>` | 이번 실행의 저장 대상만 변경 |
+
+한 번에 보관할 비추적 VOD 수는 환경변수로 정한다.
 
 ```bash
-python cli.py plan
-python cli.py watch --dry-run
+export YONSTUDY_ARCHIVE_ONLY_LIMIT=2   # 기본값 4
 ```
 
-## 사용 범위와 배포 전 확인할 것
+자동화 결과는 `store/automation_state.json`, 생성한 리포트는 `store/reports/`에서 볼 수
+있다.
 
-자신이 접근 권한을 가진 강좌에서, 개인적으로 필요한 범위만 수집하는 것을 전제로 한다.
-강의자료와 영상의 저작권은 각 권리자에게 있으므로, 생성된 아카이브를 재배포해서는 안 된다.
-LearnUs 약관, 학교 규정, 수업별 안내를 우선한다.
+## VOD 기능
 
-코드 자체를 공개 배포하려면 아래도 한 번 확인하는 것이 좋다.
+### 재생 없이 상태만 갱신
 
-- `store/`, `exports/`, 쿠키, `.env`, 로그가 커밋에 들어가지 않았는지 확인
-- `systemd/` 예시의 절대 경로와 메일 주소 같은 개인 설정 제거
-- `LICENSE`와 사용한 외부 패키지의 라이선스 조건 확인
-- 실제 계정 없이 실행할 수 있는 테스트와 환경별 설치 절차 확인
+`monitor`는 현재 학기의 새 VOD와 온라인 출석부를 읽고 과목·주차·차시 순서의 대기열을
+갱신한다. 영상 재생이나 다운로드는 하지 않는다.
 
-## 문서
+```bash
+python cli.py monitor --dry-run
+python cli.py monitor
+python cli.py monitor --course 285311 291204
+```
 
-- [구조와 데이터 모델](docs/ARCHITECTURE.md)
-- [LearnUs 페이지·엔드포인트 메모](docs/LEARNUS.md)
-- [아카이브 실측 결과](docs/FINDINGS.md)
-- [전사와 강의안 정렬](docs/STUDYKIT.md)
-- [재생과 진도 처리](docs/AUTOPLAY.md)
-- [현재 상태와 남은 일](docs/ROADMAP.md)
+결과는 `store/monitor_state.json`에 저장된다.
+
+### 재생 계획과 실행
+
+```bash
+python cli.py plan                  # 현재 재생 대상과 예상 시간
+python cli.py watch --dry-run       # 실행할 영상만 확인
+python cli.py watch --limit 1       # 한 편 재생
+python cli.py watch --rate 1.5      # 배속 지정
+```
+
+`watch`는 Playwright 브라우저로 영상을 재생하고, 종료 후 LearnUs 진도를 다시 읽어
+완료 상태를 확인한다. `scheduled-watch`는 같은 작업을 systemd용으로 한 번에 소량 실행한다.
+
+```bash
+python cli.py scheduled-watch --dry-run
+python cli.py scheduled-watch --limit 1
+```
+
+### 진도 비추적 영상 원본 보관
+
+`archive-only`는 LearnUs가 진도를 추적하지 않는 VOD를 임시 MP4로 내려받아 remote에
+올리고 임시 파일을 정리한다.
+
+```bash
+python cli.py archive-only --dry-run
+python cli.py archive-only --limit 2
+python cli.py archive-only --course 285311 --remote 'nas:home/archive/yonstudy'
+```
+
+### 오디오, 프레임과 MP4 만들기
+
+`download`의 기본 출력은 오디오와 슬라이드 전환 프레임이다.
+
+```bash
+python cli.py download --dry-run
+python cli.py download --limit 10
+python cli.py download --video             # 오디오 + 프레임 + MP4
+python cli.py download --no-audio          # 프레임만
+python cli.py download --no-frames         # 오디오만
+python cli.py download --video --no-audio --no-frames   # MP4만
+python cli.py download --course 285311 --limit 3
+```
+
+`--timeout`으로 영상별 제한 시간을 지정할 수 있고, `--force`를 붙이면 디스크 예상 용량
+검사를 통과하지 않아도 실행한다.
+
+### 강의안과 자막 정렬
+
+```bash
+python cli.py analyze --cmid 4333924
+python cli.py analyze --cmid 4333924 --slides ./lecture.pdf
+```
+
+`--slides`를 생략하면 같은 주차의 PDF 강의안을 찾아 사용한다. 자세한 출력 구조는
+[docs/STUDYKIT.md](docs/STUDYKIT.md)에 정리되어 있다.
+
+## systemd로 기능 켜고 끄기
+
+`systemd/`에는 기능별 서비스와 타이머가 들어 있다.
+
+| 타이머 | 기본 일정 | 실행 기능 |
+|---|---|---|
+| `yonstudy-keepalive.timer` | 2시간마다 | 로그인 세션 유지 |
+| `yonstudy-monitor.timer` | 02:00 KST | VOD·출석부 읽기 전용 갱신 |
+| `yonstudy-watch.timer` | 02:30, 04:00, 05:30 KST | 회차마다 영상 최대 1편 재생 |
+| `yonstudy-daily.timer` | 08:10 KST | 현재 학기 수집과 remote 업로드 |
+| `yonstudy-report.timer` | 09:00 KST | 최신 리포트 생성 및 선택적 메일 발송 |
+
+먼저 예제 환경 파일을 복사하고 설치 경로, remote, 로그인 및 메일 값을 채운다.
+
+```bash
+sudo install -d -m 700 /etc/yonstudy
+sudo install -m 600 systemd/yonstudy.env.example /etc/yonstudy/yonstudy.env
+sudo editor /etc/yonstudy/yonstudy.env
+```
+
+서비스 파일은 기본적으로 저장소가 `/root/yonstudy`에 있다고 가정한다. 다른 위치에
+설치했다면 `WorkingDirectory`, `ExecStart`, `ReadWritePaths`, `Documentation` 경로를
+해당 위치로 바꾼다.
+
+```bash
+sudo install -m 644 systemd/*.service systemd/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+필요한 기능만 골라 켠다.
+
+```bash
+# 자료 수집과 NAS 업로드
+sudo systemctl enable --now yonstudy-daily.timer
+
+# 리포트 메일
+sudo systemctl enable --now yonstudy-report.timer
+
+# 세션 유지와 VOD 상태 확인
+sudo systemctl enable --now yonstudy-keepalive.timer yonstudy-monitor.timer
+
+# 예약 영상 재생
+sudo systemctl enable --now yonstudy-watch.timer
+```
+
+기능을 끌 때는 해당 타이머만 비활성화한다.
+
+```bash
+sudo systemctl disable --now yonstudy-watch.timer
+sudo systemctl disable --now yonstudy-report.timer
+```
+
+수동 실행과 로그 확인은 서비스 이름으로 한다.
+
+```bash
+sudo systemctl start yonstudy-daily.service
+journalctl -u yonstudy-daily.service -n 100 --no-pager
+systemctl list-timers 'yonstudy-*'
+```
+
+## 환경변수 모음
+
+| 이름 | 기본값/역할 |
+|---|---|
+| `YONSTUDY_STORE` | SQLite, blob, 상태 파일 저장 위치. 기본 `./store` |
+| `LEARNUS_COOKIES` | 로그인 쿠키 파일. 기본 `store/learnus-cookies.txt` |
+| `LEARNUS_ID`, `LEARNUS_PW` | 백그라운드 자동 재로그인 |
+| `YONSTUDY_REMOTE` | `upload`, `automate`, `archive-only`의 rclone 대상 |
+| `YONSTUDY_EXPORT_DIR` | `export` 기본 출력 경로 |
+| `YONSTUDY_MAX_FILE_MB` | 일반 첨부파일 한 개의 최대 수집 크기. 기본 512MB |
+| `YONSTUDY_ARCHIVE_ONLY_LIMIT` | 자동화에서 보관할 비추적 VOD 수. 기본 4 |
+| `YONSTUDY_BROWSER_CHANNEL` | Playwright 브라우저 채널. 예: `chrome` |
+| `YONSTUDY_REPORT_TO` | 자동 리포트 수신 주소 |
+| `YONSTUDY_MAIL_FROM` | 발신 주소 |
+| `YONSTUDY_SMTP_HOST`, `YONSTUDY_SMTP_PORT` | SMTP 서버와 포트 |
+| `YONSTUDY_SMTP_STARTTLS` | STARTTLS 사용 여부. 기본 `1` |
+| `YONSTUDY_SMTP_USER`, `YONSTUDY_SMTP_PASSWORD` | SMTP 인증 값 |
+
+## 저장되는 파일
+
+```text
+store/
+  db.sqlite                 수집한 강좌, 활동, 진도, 게시글 메타데이터
+  blobs/                    로컬로 받은 원본 파일
+  reports/                  날짜별 텍스트 리포트
+  automation_state.json     마지막 자동화 결과
+  monitor_state.json        VOD·출석부 확인 결과
+  watch_state.json          예약 재생과 진도 확인 결과
+```
+
+자료 구조와 내부 흐름은 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), LearnUs 파싱 메모는
+[docs/LEARNUS.md](docs/LEARNUS.md), 재생 흐름은 [docs/AUTOPLAY.md](docs/AUTOPLAY.md)에 있다.
 
 ## 라이선스
 
-이 프로젝트의 코드는 [Apache License 2.0](LICENSE)으로 배포한다. 강의자료, 영상과 같이
-프로그램으로 수집한 콘텐츠에는 이 라이선스가 적용되지 않는다.
+코드는 [Apache License 2.0](LICENSE)으로 배포한다.

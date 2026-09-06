@@ -1,0 +1,24 @@
+[Unit]
+Description=Keep the authenticated LearnUs session active
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/yonstudy
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/yonstudy/yonstudy.env
+ExecStart=/usr/bin/flock -E 0 -n /run/yonstudy/automation.lock /usr/bin/python3 /root/yonstudy/cli.py keepalive
+UMask=0077
+RuntimeDirectory=yonstudy
+RuntimeDirectoryMode=0700
+TimeoutStartSec=2m
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/ys.learnus.org_cookies.txt /root/yonstudy/store
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run yonstudy every day at 08:10 KST
+
+[Timer]
+OnCalendar=*-*-* 08:10:00 Asia/Seoul
+Persistent=true
+RandomizedDelaySec=10m
+AccuracySec=1m
+Unit=yonstudy-daily.service
+
+[Install]
+WantedBy=timers.target
