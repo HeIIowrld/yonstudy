@@ -20,13 +20,15 @@ the same NAS.
 
 ## Initial deployment
 
-Install Synology Container Manager, copy `compose.yaml` to the deployment
-directory, and create `.env` from `deploy/synology.env.example`. Create the two
-files in `config/` from their examples and restrict the credential file:
+Install Synology Container Manager and place a clean checkout in `source/`.
+Copy `compose.yaml` to the deployment directory and create `.env` from
+`deploy/synology.env.example`. Create the two files in `config/` from their
+examples and restrict the credential file. The first image is built locally;
+there is no registry image to pull:
 
 ```bash
 chmod 600 config/yonstudy.env config/rclone.conf
-sudo docker compose pull
+sudo docker compose build scheduler
 sudo docker compose up -d
 sudo docker compose ps
 ```
@@ -35,7 +37,7 @@ Run a read-only application check:
 
 ```bash
 sudo docker exec yonstudy /app/deploy/run-job.sh keepalive
-sudo docker exec yonstudy python /app/cli.py status
+sudo docker exec yonstudy python /app/cli.py --store /data/store status
 ```
 
 ## Automatic updates
