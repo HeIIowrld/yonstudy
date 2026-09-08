@@ -44,6 +44,8 @@ enable `YONSTUDY_TIMETABLE=/config/timetable.toml` in `config/yonstudy.env`.
 Recordings uploaded to the host directory configured by
 `YONSTUDY_RECORDING_HOST_DIR` are checked every three minutes. Keep this folder
 outside the hidden deployment directory so it is easy to reach from a phone.
+If the variable is omitted, Compose uses `00.녹음_넣기` beside the configured
+archive directory.
 A file must have the same size and mtime across scans for at least 120 seconds;
 only after successful content-addressed storage is the uploaded original
 consumed from the hot folder. Failed or incomplete files remain there for a

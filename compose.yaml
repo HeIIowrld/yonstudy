@@ -14,7 +14,7 @@ services:
     volumes:
       - ${YONSTUDY_DATA_DIR}/store:/data/store
       - ${YONSTUDY_DATA_DIR}/logs:/data/logs
-      - ${YONSTUDY_RECORDING_HOST_DIR}:/data/inbox/recordings
+      - ${YONSTUDY_RECORDING_HOST_DIR:-${YONSTUDY_ARCHIVE_DIR}/../00.녹음_넣기}:/data/inbox/recordings
       - ${YONSTUDY_CONFIG_DIR}:/config:ro
       - ${YONSTUDY_ARCHIVE_DIR}:/archive
     shm_size: 1gb

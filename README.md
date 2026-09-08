@@ -522,7 +522,7 @@ systemctl list-timers 'yonstudy-*'
 | `YONSTUDY_SMTP_STARTTLS` | STARTTLS 사용 여부. 기본 `1` |
 | `YONSTUDY_SMTP_USER`, `YONSTUDY_SMTP_PASSWORD` | SMTP 인증 값 |
 | `YONSTUDY_RECORDING_INBOX` | 녹음 핫폴더. 컨테이너 기본 `/data/inbox/recordings` |
-| `YONSTUDY_RECORDING_HOST_DIR` | Docker가 마운트할 NAS의 휴대폰용 녹음 투입 폴더 |
+| `YONSTUDY_RECORDING_HOST_DIR` | Docker가 마운트할 NAS의 휴대폰용 녹음 투입 폴더. 생략하면 아카이브의 형제 `00.녹음_넣기` |
 | `YONSTUDY_RECORDING_DESTINATION` | 분류된 녹음을 둘 평면 아카이브 루트 |
 | `YONSTUDY_RECORDING_STABLE_SECONDS` | 두 스캔 사이 파일 안정화 시간. 기본 120초 |
 | `YONSTUDY_TIMETABLE` | 매 핫폴더 스캔 전에 가져올 TOML/JSON/CSV 시간표 |
