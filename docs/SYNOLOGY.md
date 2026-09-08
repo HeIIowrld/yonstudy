@@ -9,7 +9,9 @@ The production layout keeps mutable data and secrets outside the image:
 ├── source/                 clean Git checkout used for builds
 ├── config/
 │   ├── yonstudy.env        mode 0600; LearnUs and mail credentials
-│   └── rclone.conf         local archive alias
+│   ├── rclone.conf         local archive alias
+│   └── timetable.toml      optional class schedule for recording matching
+├── inbox/recordings/       phone/PC recording hot folder
 ├── logs/
 └── store/                  SQLite, blobs, reports, cookies
 ```
@@ -31,6 +33,21 @@ chmod 600 config/yonstudy.env config/rclone.conf
 sudo docker compose build scheduler
 sudo docker compose up -d
 sudo docker compose ps
+```
+
+To enable recording classification, copy `deploy/timetable.toml.example` to
+`config/timetable.toml`, replace its course IDs with values from `courses`, and
+enable `YONSTUDY_TIMETABLE=/config/timetable.toml` in `config/yonstudy.env`.
+Recordings uploaded to `inbox/recordings/` are checked every three minutes. A
+file must have the same size and mtime across scans for at least 120 seconds;
+after successful content-addressed storage it is consumed from the hot folder.
+Matched recordings are linked into the course root under `/archive`, while
+uncertain files go to `/archive/unmatched/recordings`.
+
+```bash
+mkdir -p inbox/recordings
+cp source/deploy/timetable.toml.example config/timetable.toml
+sudo docker exec yonstudy /app/deploy/run-job.sh recordings
 ```
 
 Run a read-only application check:

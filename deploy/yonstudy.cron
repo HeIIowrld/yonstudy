@@ -2,6 +2,9 @@ SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 TZ=Asia/Seoul
 
+# A second scan at least two minutes later confirms that an SMB upload is complete.
+2-59/3 * * * * root /app/deploy/run-job.sh recordings
+
 # Keep the LearnUs session alive every two hours.
 25 */2 * * * root /app/deploy/run-job.sh keepalive
 

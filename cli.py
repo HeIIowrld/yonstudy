@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -46,6 +47,17 @@ DEFAULT_REMOTE = os.environ.get(
     "YONSTUDY_REMOTE",
     os.environ.get("YONSTUDY_ONEDRIVE_REMOTE", "remote:yonstudy"),
 )
+DEFAULT_RECORDING_INBOX = os.environ.get(
+    "YONSTUDY_RECORDING_INBOX", str(PROJECT_ROOT / "inbox/recordings")
+)
+DEFAULT_TIMETABLE = os.environ.get("YONSTUDY_TIMETABLE")
+DEFAULT_RECORDING_DESTINATION = os.environ.get("YONSTUDY_RECORDING_DESTINATION")
+try:
+    DEFAULT_RECORDING_STABLE_SECONDS = int(
+        os.environ.get("YONSTUDY_RECORDING_STABLE_SECONDS", "120")
+    )
+except ValueError:
+    DEFAULT_RECORDING_STABLE_SECONDS = 120
 
 
 def get_client(args) -> LearnUsClient:
@@ -168,6 +180,7 @@ def cmd_status(args) -> int:
     print(f"  파일            {s['files']}  ({s['file_bytes']/1024/1024:.1f}MB)")
     print(f"  게시판/포럼 글  {s['posts']}  ({s['boards']}개 게시판)")
     print(f"  자막(전사)      {s['transcripts']}")
+    print(f"  외부 녹음       {s['recordings']}  (과목 매칭: {s['recordings_matched']})")
     return 0
 
 
@@ -541,6 +554,96 @@ def cmd_analyze(args) -> int:
     return analyze_lecture(Store(args.store), cmid=args.cmid, slides=args.slides)
 
 
+def cmd_timetable_import(args) -> int:
+    """외부 TOML/JSON/CSV 시간표를 녹음 분류용으로 저장한다."""
+    from dataclasses import asdict
+    from yonstudy.recordings import import_timetable
+
+    try:
+        result = import_timetable(
+            Store(args.store),
+            args.path,
+            year=args.year,
+            semester=args.semester,
+            valid_from=args.valid_from,
+            valid_to=args.valid_to,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"시간표 가져오기 실패: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_classify_recordings(args) -> int:
+    """녹음 폴더를 스캔하고 시간표/파일명으로 과목별 분류한다."""
+    from yonstudy.recordings import (
+        classify_recordings,
+        import_timetable,
+        reclassify_unmatched,
+    )
+
+    store = Store(args.store)
+    if args.timetable:
+        try:
+            imported = import_timetable(
+                store,
+                args.timetable,
+                year=args.year,
+                semester=args.semester,
+                valid_from=args.valid_from,
+                valid_to=args.valid_to,
+                commit=not args.dry_run,
+            )
+            print(f"시간표 갱신: {imported.courses}과목 · 주간 슬롯 {imported.slots}개")
+        except (OSError, ValueError) as exc:
+            print(f"시간표 가져오기 실패: {exc}", file=sys.stderr)
+            return 1
+
+    extensions = None
+    if args.extensions:
+        extensions = {
+            value if value.startswith(".") else f".{value}"
+            for value in re.split(r"[,\s]+", args.extensions.lower())
+            if value
+        }
+    reclassified = 0
+    try:
+        if not args.dry_run and (args.scan_mode or args.timetable):
+            reclassified = reclassify_unmatched(
+                store,
+                destination=args.destination,
+                grace_minutes=args.grace_minutes,
+            )
+        result = classify_recordings(
+            store,
+            args.source,
+            timezone=args.timezone,
+            grace_minutes=args.grace_minutes,
+            recursive=not args.no_recursive,
+            extensions=extensions,
+            dry_run=args.dry_run,
+            move=args.move,
+            destination=args.destination,
+            stable_seconds=args.stable_seconds,
+            scan_state_path=(
+                Path(args.store) / "recording_scan_state.json"
+                if args.scan_mode
+                else None
+            ),
+        )
+    except (OSError, ValueError) as exc:
+        if args.dry_run and args.timetable:
+            store.db.rollback()
+        print(f"녹음 분류 실패: {exc}", file=sys.stderr)
+        return 1
+    if args.dry_run and args.timetable:
+        store.db.rollback()
+    result.reclassified = reclassified
+    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+    return 1 if result.failed else 0
+
+
 def cmd_layout_plan(args) -> int:
     """평면 아카이브의 목표 경로만 계산한다. 파일 작업과 네트워크 요청은 하지 않는다."""
     from yonstudy.daily import SEOUL, current_term
@@ -757,6 +860,73 @@ def main() -> int:
     an.add_argument("--cmid", type=int, required=True)
     an.add_argument("--slides", help="강의안 PDF 경로 (생략 시 같은 주차 자료에서 추측)")
     an.set_defaults(fn=cmd_analyze)
+
+    timetable = sub.add_parser(
+        "timetable-import",
+        help="TOML/JSON/CSV 수업 시간표를 녹음 매칭용으로 가져오기",
+    )
+    timetable.add_argument("path", help="시간표 TOML, JSON 또는 CSV")
+    timetable.add_argument("--year", help="강좌 연도 필터")
+    timetable.add_argument("--semester", help="강좌 학기 필터")
+    timetable.add_argument("--valid-from", help="시간표 시작일 YYYY-MM-DD")
+    timetable.add_argument("--valid-to", help="시간표 종료일 YYYY-MM-DD")
+    timetable.set_defaults(fn=cmd_timetable_import)
+
+    recordings = sub.add_parser(
+        "classify-recordings",
+        aliases=["import-recording"],
+        help="녹음 시각과 시간표를 대조해 과목별 폴더로 자동 분류",
+    )
+    recordings.add_argument("source", nargs="+", help="녹음 파일 또는 폴더")
+    recordings.add_argument("--timetable", help="분류 전에 가져올 시간표 TOML/JSON/CSV")
+    recordings.add_argument("--year", help="시간표 강좌 연도 필터")
+    recordings.add_argument("--semester", help="시간표 강좌 학기 필터")
+    recordings.add_argument("--valid-from", help="시간표 시작일 YYYY-MM-DD")
+    recordings.add_argument("--valid-to", help="시간표 종료일 YYYY-MM-DD")
+    recordings.add_argument("--timezone", default="Asia/Seoul")
+    recordings.add_argument("--grace-minutes", type=int, default=20,
+                            help="수업 전후 매칭 여유(분, 기본 20)")
+    recordings.add_argument("--extensions",
+                            help="대상 확장자 목록. 예: m4a,mp3,wav")
+    recordings.add_argument("--no-recursive", action="store_true")
+    recordings.add_argument("--move", action="store_true",
+                            help="성공적으로 보관한 뒤 입력 원본 삭제")
+    recordings.add_argument("--destination", default=DEFAULT_RECORDING_DESTINATION,
+                            help="분류된 파일을 둘 아카이브 루트")
+    recordings.add_argument("--stable-seconds", type=int, default=0,
+                            help="이 시간 동안 파일이 변하지 않은 뒤 처리")
+    recordings.add_argument("--dry-run", action="store_true",
+                            help="파일과 DB를 변경하지 않고 분류 결과만 확인")
+    recordings.set_defaults(fn=cmd_classify_recordings, scan_mode=False)
+
+    scan_recordings = sub.add_parser(
+        "scan-recordings",
+        help="녹음 핫폴더에서 업로드가 끝난 파일을 찾아 자동 분류",
+    )
+    scan_recordings.add_argument(
+        "source", nargs="*", default=[DEFAULT_RECORDING_INBOX],
+        help=f"핫폴더 (기본: {DEFAULT_RECORDING_INBOX})",
+    )
+    scan_recordings.add_argument("--timetable", default=DEFAULT_TIMETABLE,
+                                 help="매 실행 전에 갱신할 시간표 JSON/CSV/TOML")
+    scan_recordings.add_argument("--year", help="시간표 강좌 연도 필터")
+    scan_recordings.add_argument("--semester", help="시간표 강좌 학기 필터")
+    scan_recordings.add_argument("--valid-from", help="시간표 시작일 YYYY-MM-DD")
+    scan_recordings.add_argument("--valid-to", help="시간표 종료일 YYYY-MM-DD")
+    scan_recordings.add_argument("--timezone", default="Asia/Seoul")
+    scan_recordings.add_argument("--grace-minutes", type=int, default=20)
+    scan_recordings.add_argument("--extensions", help="대상 확장자 목록")
+    scan_recordings.add_argument("--no-recursive", action="store_true")
+    scan_recordings.add_argument("--consume", dest="move", action="store_true",
+                                 help="보관 성공 뒤 핫폴더 원본 제거")
+    scan_recordings.add_argument("--destination", default=DEFAULT_RECORDING_DESTINATION,
+                                 help="분류된 파일을 둘 아카이브 루트")
+    scan_recordings.add_argument(
+        "--stable-seconds", type=int, default=DEFAULT_RECORDING_STABLE_SECONDS,
+        help="두 스캔 사이 파일 안정화 시간(기본 120초)",
+    )
+    scan_recordings.add_argument("--dry-run", action="store_true")
+    scan_recordings.set_defaults(fn=cmd_classify_recordings, scan_mode=True)
 
     args = p.parse_args()
     return args.fn(args)

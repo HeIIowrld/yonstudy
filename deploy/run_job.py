@@ -15,6 +15,13 @@ LOG = Path("/data/logs/scheduler.log")
 LOCK = "/run/yonstudy/automation.lock"
 
 JOBS: dict[str, tuple[list[str], bool]] = {
+    "recordings": (
+        [
+            "scan-recordings", "/data/inbox/recordings",
+            "--destination", "/archive", "--consume",
+        ],
+        False,
+    ),
     "keepalive": (["keepalive"], False),
     "monitor": (["monitor"], False),
     "watch": (["scheduled-watch", "--limit", "1"], False),

@@ -16,6 +16,7 @@ yonstudy/
 │   ├── vod.py               HLS 산출물 추출(ffmpeg)
 │   ├── progress.py          진도율·최대 학습 위치 공통 완료 판정
 │   ├── autoplay.py          진도 스케줄러와 재생 워커(Playwright)
+│   ├── recordings.py        시간표 가져오기, 녹음시각 판정과 과목 자동 분류
 │   └── studykit/
 │       ├── slides.py         PDF 슬라이드 추출, 강의안 후보 탐색
 │       ├── align.py          TF-IDF·DTW 정렬, hotword 추출, 언어 감지
@@ -49,6 +50,7 @@ store/
     ├── submissions/<모듈>/          내가 제출한 파일
     ├── subtitles/                  자막 VTT
     ├── audio/                      추출한 오디오 (opus)
+    ├── recordings/                 외부 수업 녹음 (원본 형식 유지)
     ├── boards/                     게시판 첨부
     ├── notes/                      생성한 학습 노트
     └── forum_posts.json            내가 쓴 포럼 글
@@ -92,6 +94,17 @@ file        (id PK, course_id, cmid, role, name, url, sha256, bytes, saved_at)
 
 transcript  (id PK, cmid, source, lang, path, segments, created_at)
              -- source: learnus_auto / whisper / vibevoice …
+
+timetable_slot (id PK, course_id, weekday, starts_at, ends_at,
+                valid_from, valid_to, location, source, imported_at)
+             -- weekday는 월=0 .. 일=6. 자정을 넘는 수업도 표현 가능
+
+recording   (id PK, sha256 UNIQUE, original_name, source_path, captured_at,
+             metadata_title, source_bytes, source_mtime_ns, timestamp_source,
+             duration_sec, course_id, timetable_slot_id, week, lesson,
+             match_status, match_method, confidence, path, details_json,
+             imported_at, updated_at)
+             -- match_status: matched / ambiguous / unclassified
 
 crawl_log   (id PK, at, kind, ref, ok, note)
 ```

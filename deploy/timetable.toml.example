@@ -1,0 +1,18 @@
+# course_id는 `python cli.py courses` 출력의 cid 값이다.
+year = "2026"
+semester = "2학기"
+valid_from = "2026-09-01"
+valid_to = "2026-12-20"
+
+[[class]]
+course_id = 123456
+days = ["tue", "thu"]
+start = "10:00"
+end = "11:50"
+location = "공학관 101"
+
+[[class]]
+course = "운영체제"
+weekday = "fri"
+start = "13:00"
+end = "14:50"

@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -103,6 +105,46 @@ CREATE TABLE IF NOT EXISTS transcript (
     UNIQUE(cmid, source, lang)
 );
 
+-- 대면 수업 시간표. 외부 녹음 파일을 강좌에 연결할 때 사용한다.
+CREATE TABLE IF NOT EXISTS timetable_slot (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    weekday INTEGER NOT NULL,       -- Python weekday: 월=0 .. 일=6
+    starts_at TEXT NOT NULL,        -- HH:MM
+    ends_at TEXT NOT NULL,          -- HH:MM (다음 날 종료도 허용)
+    valid_from TEXT NOT NULL,
+    valid_to TEXT NOT NULL,
+    location TEXT,
+    source TEXT NOT NULL,
+    imported_at TEXT,
+    UNIQUE(course_id, weekday, starts_at, ends_at, valid_from, valid_to, source)
+);
+
+-- 휴대폰/녹음기에서 가져온 원본과 시간표 분류 결과.
+CREATE TABLE IF NOT EXISTS recording (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256 TEXT NOT NULL UNIQUE,
+    original_name TEXT,
+    metadata_title TEXT,
+    source_path TEXT,
+    source_bytes INTEGER,
+    source_mtime_ns INTEGER,
+    captured_at TEXT,
+    timestamp_source TEXT,
+    duration_sec REAL,
+    course_id INTEGER,
+    timetable_slot_id INTEGER,
+    week INTEGER,
+    lesson INTEGER,
+    match_status TEXT NOT NULL,     -- matched / ambiguous / unclassified
+    match_method TEXT,
+    confidence REAL,
+    path TEXT,
+    details_json TEXT,
+    imported_at TEXT,
+    updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS crawl_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at TEXT, kind TEXT, ref TEXT, ok INTEGER, note TEXT
@@ -126,6 +168,10 @@ CREATE INDEX IF NOT EXISTS idx_post_course ON post(course_id);
 CREATE INDEX IF NOT EXISTS idx_post_cmid ON post(cmid);
 CREATE INDEX IF NOT EXISTS idx_change_at ON change_event(at);
 CREATE INDEX IF NOT EXISTS idx_change_course ON change_event(course_id);
+CREATE INDEX IF NOT EXISTS idx_timetable_course ON timetable_slot(course_id);
+CREATE INDEX IF NOT EXISTS idx_timetable_weekday ON timetable_slot(weekday);
+CREATE INDEX IF NOT EXISTS idx_recording_course ON recording(course_id);
+CREATE INDEX IF NOT EXISTS idx_recording_captured ON recording(captured_at);
 """
 
 
@@ -174,6 +220,39 @@ class Store:
             tmp.write_bytes(data)
             tmp.rename(path)
         return digest, len(data)
+
+    def put_blob_file(self, source: str | Path) -> tuple[str, int]:
+        """큰 파일을 메모리에 전부 올리지 않고 content-addressed blob으로 넣는다."""
+        source = Path(source)
+        digest = hashlib.sha256()
+        size = 0
+        with source.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        hexdigest = digest.hexdigest()
+        destination = self.blob_path(hexdigest)
+        if destination.exists():
+            return hexdigest, size
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{hexdigest[:12]}.", suffix=".part", dir=destination.parent
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            shutil.copyfile(source, temporary)
+            # mkstemp는 0600이므로, 아카이브에 하드링크된 파일도 읽을 수 있게 맞춘다.
+            temporary.chmod(0o644)
+            try:
+                temporary.replace(destination)
+            except FileExistsError:
+                # 다른 프로세스가 같은 blob을 먼저 완성했으면 그 파일을 쓴다.
+                pass
+        finally:
+            temporary.unlink(missing_ok=True)
+        return hexdigest, size
 
     def blob_path(self, digest: str) -> Path:
         return self.root / "blobs" / digest[:2] / digest[2:4] / digest
@@ -558,6 +637,24 @@ class Store:
             tuple(row.values()),
         )
 
+    def save_recording(self, row: dict) -> None:
+        row = dict(row)
+        now = _now()
+        row.setdefault("imported_at", now)
+        row.setdefault("updated_at", now)
+        columns = ", ".join(row)
+        marks = ", ".join("?" * len(row))
+        updates = ", ".join(
+            f"{column}=excluded.{column}"
+            for column in row
+            if column not in {"sha256", "imported_at"}
+        )
+        self.db.execute(
+            f"INSERT INTO recording ({columns}) VALUES ({marks}) "
+            f"ON CONFLICT(sha256) DO UPDATE SET {updates}",
+            tuple(row.values()),
+        )
+
     def log(self, kind: str, ref: str, ok: bool, note: str = "") -> None:
         """진단용 기록. 다른 프로세스가 DB를 쓰고 있으면 조용히 건너뛴다 —
         로그 한 줄 때문에 긴 작업 전체가 죽으면 안 된다."""
@@ -598,6 +695,10 @@ class Store:
             "files": q("SELECT COUNT(*) FROM file"),
             "file_bytes": q("SELECT COALESCE(SUM(bytes),0) FROM file"),
             "transcripts": q("SELECT COUNT(*) FROM transcript"),
+            "recordings": q("SELECT COUNT(*) FROM recording"),
+            "recordings_matched": q(
+                "SELECT COUNT(*) FROM recording WHERE match_status='matched'"
+            ),
             "posts": q("SELECT COUNT(*) FROM post"),
             "boards": q("SELECT COUNT(DISTINCT cmid) FROM post"),
         }

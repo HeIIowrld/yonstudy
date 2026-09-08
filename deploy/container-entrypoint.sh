@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-install -d -m 0700 /data/store /data/logs /run/yonstudy
+install -d -m 0700 /data/store /data/logs /data/inbox/recordings /run/yonstudy
 touch /data/logs/scheduler.log
 chmod 0600 /data/logs/scheduler.log
 

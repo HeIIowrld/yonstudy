@@ -20,9 +20,14 @@ SFTP, WebDAV, OneDrive 같은 rclone 저장소에 증분 업로드할 수 있다
 | 재생 대상 확인/실행 | `plan`, `watch` | 현재 학기 미완료 영상 재생 및 진도 재확인 |
 | 영상 파생 파일 만들기 | `download` | 오디오, 슬라이드 프레임, 선택적으로 MP4 생성 |
 | 강의안과 자막 연결 | `analyze` | PDF 페이지와 자막 구간을 정렬한 리포트 생성 |
+| 시간표 가져오기 | `timetable-import` | TOML/JSON/CSV 수업 시간을 강좌와 연결해 저장 |
+| 수업 녹음 정리 | `classify-recordings` | 녹음 시각을 시간표와 대조해 과목별로 자동 분류 |
 
 Python 3.10 이상을 사용한다. 기본 수집과 리포트는 Python 표준 라이브러리만으로
 동작하고, 영상 및 PDF 기능은 필요한 패키지만 추가하면 된다.
+
+Python 3.10에서 TOML 시간표를 사용할 때만 `python -m pip install tomli`가 필요하다.
+Python 3.11 이상과 배포 컨테이너에는 TOML 파서가 기본 포함되어 있다.
 
 ## 빠른 시작
 
@@ -365,6 +370,78 @@ python cli.py analyze --cmid 4333924 --slides ./lecture.pdf
 `--slides`를 생략하면 같은 주차의 PDF 강의안을 찾아 사용한다. 자세한 출력 구조는
 [docs/STUDYKIT.md](docs/STUDYKIT.md)에 정리되어 있다.
 
+### 시간표 매칭과 수업 녹음 자동 분류
+
+먼저 `archive`로 현재 강좌를 받아 둔 뒤 시간표를 TOML, JSON 또는 CSV로 준비한다. 시간표의
+`course`는 아카이브의 과목명·과목코드와 대조하며, 이름이 비슷한 강좌가 여럿이면
+`course_id`를 쓰면 된다. `days`에는 요일을 여러 개 넣을 수 있다.
+
+```json
+{
+  "year": "2026",
+  "semester": "2학기",
+  "valid_from": "2026-09-01",
+  "valid_to": "2026-12-20",
+  "classes": [
+    {
+      "course": "데이터베이스",
+      "days": ["월", "수"],
+      "start": "09:00",
+      "end": "10:50",
+      "location": "공학관 101"
+    },
+    {
+      "course_id": 285311,
+      "weekday": "금",
+      "start": "13:00",
+      "end": "14:50"
+    }
+  ]
+}
+```
+
+CSV는 `course`(또는 `course_id`), `weekday`, `start`, `end`, `valid_from`,
+`valid_to`, `location` 열을 사용한다. 유효기간을 생략하면 `--year`와 `--semester`의
+학기 범위를 적용한다.
+
+```bash
+# 시간표만 먼저 저장
+python cli.py timetable-import ./timetable.json
+
+# 시간표 갱신과 분류 결과 미리보기
+python cli.py classify-recordings ~/Recordings \
+  --timetable ./timetable.json --dry-run
+
+# 실제 보관. 원본은 그대로 남는다.
+python cli.py import-recording ~/Recordings/lecture.m4a
+
+# 보관 성공 뒤 입력 폴더의 원본도 지우려는 경우에만 명시
+python cli.py classify-recordings ~/Recordings --move
+
+# 핫폴더 스캔. 첫 발견 후 120초 이상 크기와 mtime이 같아야 처리한다.
+python cli.py scan-recordings ./inbox/recordings --destination ./exports/archive
+```
+
+녹음 시각은 미디어 `creation_time` → `파일명의 YYYYMMDD_HHMMSS` → 파일 mtime
+순으로 정한다. 기본적으로 수업 전후 20분까지 같은 시간표 슬롯으로 인정하며
+`--grace-minutes`로 바꿀 수 있다. 같은 시간에 두 과목이 겹치면 파일명에 포함된 과목명이나
+과목코드로 해소한다. 그래도 하나로 정할 수 없는 파일은 억지로 배정하지 않고 각각
+`store/recordings/ambiguous`, `store/recordings/unclassified`에 둔다.
+
+분류된 파일은 SHA-256 blob으로 중복 제거한다. `--destination`을 주면 기존 평면 아카이브의
+과목 루트에 `W03-L01__강의녹음__20260915_1000__r8ab12c34.m4a` 형태로 연결하고,
+생략하면 `store/courses/<학기>/<과목>/recordings/`에 둔다. 같은 녹음을 다시 실행해도
+DB에는 한 건만 남는다. 메타데이터 제목, 녹음시각 출처, 주차·차시, 매칭 방법과 신뢰도도
+`recording` 테이블에 함께 기록한다.
+시간표 없이 먼저 `unmatched`로 들어간 녹음도 이후 시간표가 추가되면 저장된 blob을
+다시 판정해 과목 폴더로 자동 이동한다.
+
+컨테이너 배포에서는 `/data/inbox/recordings`를 3분마다 스캔한다. 첫 스캔에서는 파일을
+대기시키고 다음 스캔까지 크기와 mtime이 120초 이상 같을 때만 가져오므로 SMB 업로드 중인
+파일을 읽지 않는다. 성공한 원본은 정확한 바이트가 blob과 아카이브에 보관된 뒤 핫폴더에서
+제거된다. `deploy/timetable.toml.example`을 `/config/timetable.toml`로 복사해 편집하고
+`YONSTUDY_TIMETABLE=/config/timetable.toml`을 설정하면 매 스캔 전에 시간표도 갱신한다.
+
 ## systemd로 기능 켜고 끄기
 
 `systemd/`에는 기능별 서비스와 타이머가 들어 있다.
@@ -442,6 +519,10 @@ systemctl list-timers 'yonstudy-*'
 | `YONSTUDY_SMTP_HOST`, `YONSTUDY_SMTP_PORT` | SMTP 서버와 포트 |
 | `YONSTUDY_SMTP_STARTTLS` | STARTTLS 사용 여부. 기본 `1` |
 | `YONSTUDY_SMTP_USER`, `YONSTUDY_SMTP_PASSWORD` | SMTP 인증 값 |
+| `YONSTUDY_RECORDING_INBOX` | 녹음 핫폴더. 컨테이너 기본 `/data/inbox/recordings` |
+| `YONSTUDY_RECORDING_DESTINATION` | 분류된 녹음을 둘 평면 아카이브 루트 |
+| `YONSTUDY_RECORDING_STABLE_SECONDS` | 두 스캔 사이 파일 안정화 시간. 기본 120초 |
+| `YONSTUDY_TIMETABLE` | 매 핫폴더 스캔 전에 가져올 TOML/JSON/CSV 시간표 |
 
 ## 저장되는 파일
 
@@ -453,6 +534,8 @@ store/
   automation_state.json     마지막 자동화 결과
   monitor_state.json        VOD·출석부 확인 결과
   watch_state.json          예약 재생과 진도 확인 결과
+  recording_scan_state.json 핫폴더 파일 크기·mtime 안정화 상태
+  recordings/               모호하거나 미분류된 외부 녹음
 ```
 
 자료 구조와 내부 흐름은 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), LearnUs 파싱 메모는
