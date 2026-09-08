@@ -34,7 +34,8 @@ COPY yonstudy ./yonstudy
 COPY deploy ./deploy
 
 RUN chmod 0755 /app/deploy/container-entrypoint.sh /app/deploy/run-job.sh \
-        /app/deploy/update-loop.sh /app/deploy/update-once.sh \
+        /app/deploy/run_job.py /app/deploy/update-loop.sh \
+        /app/deploy/update-once.sh \
     && install -m 0644 /app/deploy/yonstudy.cron /etc/cron.d/yonstudy
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
