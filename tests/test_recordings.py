@@ -115,11 +115,43 @@ class RecordingClassificationTests(unittest.TestCase):
         self.assertEqual(row["course_id"], 1)
         self.assertEqual(row["timestamp_source"], "filename")
         self.assertEqual(row["metadata_title"], "데이터베이스 1주차")
-        self.assertEqual((row["week"], row["lesson"]), (1, 1))
+        self.assertEqual((row["week"], row["lesson"]), (2, 1))
         target = self.store.root / row["path"]
         self.assertEqual(target.read_bytes(), b"recording bytes")
-        self.assertTrue(target.name.startswith("W01-L01__강의녹음__20260907_0915__r"))
+        self.assertTrue(target.name.startswith("W02-L01__강의녹음__20260907_0915__r"))
         self.assertTrue(recording.exists(), "기본 동작은 입력 원본을 보존해야 한다")
+
+    def test_metadata_before_class_uses_monday_week_and_upcoming_slot(self):
+        path = self._write_timetable([
+            {
+                "course_id": 1, "days": ["월", "수"],
+                "start": "14:00", "end": "15:50",
+            },
+            {
+                "course_id": 2, "weekday": "수",
+                "start": "12:00", "end": "13:50",
+            },
+        ])
+        import_timetable(self.store, path)
+        recording = self.root / "음성 녹음.m4a"
+        recording.write_bytes(b"recording before class")
+
+        # 13:55 KST는 직전 수업 종료와 다음 수업 시작에서 모두 5분 거리다.
+        # 사용자가 수업 전에 녹음을 켠 경우이므로 14시 수업을 택한다.
+        with patch(
+            "yonstudy.recordings.probe_media",
+            return_value=("2026-09-09T04:55:00Z", 3600.0, None),
+        ):
+            result = classify_recordings(self.store, [recording])
+
+        self.assertEqual(result.matched, 1)
+        item = result.items[0]
+        self.assertEqual(item["timestamp_source"], "metadata")
+        self.assertEqual(item["course_id"], 1)
+        self.assertEqual((item["week"], item["lesson"]), (2, 2))
+        self.assertEqual(item["method"], "timetable+upcoming")
+        target = self.store.root / self.store.query("SELECT path FROM recording")[0]["path"]
+        self.assertTrue(target.name.startswith("W02-L02__강의녹음__20260909_1355__r"))
 
     def test_dry_run_does_not_import_or_copy(self):
         path = self._write_timetable([{

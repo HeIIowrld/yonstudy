@@ -484,7 +484,16 @@ def _course_hint_ids(courses: list[dict], filename: str) -> set[int]:
 
 def _week_and_lesson(store, slot: dict, captured_at: datetime) -> tuple[int, int]:
     first = date.fromisoformat(slot["valid_from"])
-    week = 0 if first.year <= 1900 else max(1, (captured_at.date() - first).days // 7 + 1)
+    occurrence = captured_at.date()
+    # 자정을 넘긴 수업은 녹음일이 아니라 실제 수업 시작일을 기준으로 주차를 센다.
+    if occurrence.weekday() != int(slot["weekday"]):
+        previous = occurrence - timedelta(days=1)
+        if previous.weekday() == int(slot["weekday"]):
+            occurrence = previous
+    # 같은 월·수 수업이 언제나 같은 n주차에 속하도록 학기 시작일이 포함된
+    # 월요일을 주차 경계로 사용한다.
+    week_start = first - timedelta(days=first.weekday())
+    week = 0 if first.year <= 1900 else max(1, (occurrence - week_start).days // 7 + 1)
     weekly_slots = {
         (int(row["weekday"]), row["starts_at"], row["ends_at"])
         for row in store.query(
@@ -536,15 +545,26 @@ def match_recording(
         start, end = interval
         distance = _distance_seconds(captured_at, start, end)
         if distance <= grace:
+            relation = (
+                "upcoming" if captured_at < start
+                else "ended" if captured_at > end
+                else "in_class"
+            )
             candidates.append({
                 "slot": slot,
                 "distance": distance,
                 "start": start,
                 "end": end,
+                "relation": relation,
                 "hinted": int(slot["course_id"]) in hints,
             })
     candidates.sort(
-        key=lambda item: (item["distance"], not item["hinted"], item["slot"]["id"])
+        key=lambda item: (
+            item["distance"],
+            {"in_class": 0, "upcoming": 1, "ended": 2}[item["relation"]],
+            not item["hinted"],
+            item["slot"]["id"],
+        )
     )
 
     if candidates:
@@ -564,6 +584,20 @@ def match_recording(
             and candidates[1]["distance"] - candidates[0]["distance"] >= 10 * 60
         ):
             chosen = candidates[0]
+        elif candidates[0]["relation"] == "upcoming":
+            # 직전 수업 종료와 다음 수업 시작의 정확한 중간(예: 13:55)은
+            # 녹음을 미리 켠 것으로 보고 다음 수업에 배정한다. 같은 시각에
+            # 시작할 수업이 여럿이면 기존처럼 모호 상태를 유지한다.
+            nearest = [
+                item for item in candidates
+                if item["distance"] == candidates[0]["distance"]
+            ]
+            upcoming = [item for item in nearest if item["relation"] == "upcoming"]
+            if len(upcoming) == 1 and all(
+                item["relation"] in {"upcoming", "ended"} for item in nearest
+            ):
+                chosen = upcoming[0]
+                method = "timetable+upcoming"
         if chosen is not None:
             slot = chosen["slot"]
             week, lesson = _week_and_lesson(store, slot, captured_at)
@@ -597,6 +631,7 @@ def match_recording(
                         f"{slot['starts_at']}-{slot['ends_at']}"
                     ),
                     "distance_minutes": round(chosen["distance"] / 60, 1),
+                    "timing": chosen["relation"],
                 },
             )
 

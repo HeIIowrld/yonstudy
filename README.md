@@ -428,6 +428,11 @@ python cli.py scan-recordings ./inbox/recordings --destination ./exports/archive
 과목코드로 해소한다. 그래도 하나로 정할 수 없는 파일은 억지로 배정하지 않고 각각
 `store/recordings/ambiguous`, `store/recordings/unclassified`에 둔다.
 
+주차는 학기 시작일이 포함된 월요일부터 계산하고, 같은 과목의 주간 수업을 요일·시간순으로
+정렬해 차시를 붙인다. 예를 들어 월·수 수업의 수요일 녹음은 `W02-L02`처럼 저장된다.
+수업 사이 정중앙 시각(예: 앞 수업이 13:50에 끝나고 다음 수업이 14:00에 시작할 때
+13:55)에 녹음을 시작했다면 다음 수업을 우선한다.
+
 분류된 파일은 SHA-256 blob으로 중복 제거한다. `--destination`을 주면 기존 평면 아카이브의
 과목 루트에 `W03-L01__강의녹음__20260915_1000__r8ab12c34.m4a` 형태로 연결하고,
 생략하면 `store/courses/<학기>/<과목>/recordings/`에 둔다. 같은 녹음을 다시 실행해도
