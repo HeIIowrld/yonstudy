@@ -11,9 +11,12 @@ The production layout keeps mutable data and secrets outside the image:
 │   ├── yonstudy.env        mode 0600; LearnUs and mail credentials
 │   ├── rclone.conf         local archive alias
 │   └── timetable.toml      optional class schedule for recording matching
-├── inbox/recordings/       phone/PC recording hot folder
 ├── logs/
 └── store/                  SQLite, blobs, reports, cookies
+
+~/02_Personal/01_학교/
+├── 00.녹음_넣기/           phone/PC recording hot folder
+└── 10.학기/                human-readable course archive
 ```
 
 The human-readable archive is mounted separately at `/archive`. The configured
@@ -38,14 +41,17 @@ sudo docker compose ps
 To enable recording classification, copy `deploy/timetable.toml.example` to
 `config/timetable.toml`, replace its course IDs with values from `courses`, and
 enable `YONSTUDY_TIMETABLE=/config/timetable.toml` in `config/yonstudy.env`.
-Recordings uploaded to `inbox/recordings/` are checked every three minutes. A
-file must have the same size and mtime across scans for at least 120 seconds;
-after successful content-addressed storage it is consumed from the hot folder.
-Matched recordings are linked into the course root under `/archive`, while
-uncertain files go to `/archive/unmatched/recordings`.
+Recordings uploaded to the host directory configured by
+`YONSTUDY_RECORDING_HOST_DIR` are checked every three minutes. Keep this folder
+outside the hidden deployment directory so it is easy to reach from a phone.
+A file must have the same size and mtime across scans for at least 120 seconds;
+only after successful content-addressed storage is the uploaded original
+consumed from the hot folder. Failed or incomplete files remain there for a
+later retry. Matched recordings are linked into the course root under
+`/archive`, while uncertain files go to `/archive/unmatched/recordings`.
 
 ```bash
-mkdir -p inbox/recordings
+mkdir -p /volume3/homes/USER/02_Personal/01_학교/00.녹음_넣기
 cp source/deploy/timetable.toml.example config/timetable.toml
 sudo docker exec yonstudy /app/deploy/run-job.sh recordings
 ```

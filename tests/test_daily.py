@@ -43,7 +43,9 @@ class DailyReportTests(unittest.TestCase):
             "section_name": "1주차",
             "indent": 0,
             "completion": completion,
-            "open_from": f"{day} 09:00:00",
+            # The fixture must already be open even when CI runs just after
+            # midnight in Asia/Seoul.
+            "open_from": f"{day} 00:00:00",
             "open_to": f"{day} 23:59:59",
             "late_until": None,
             "duration": "10:00",

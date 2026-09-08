@@ -436,10 +436,12 @@ DB에는 한 건만 남는다. 메타데이터 제목, 녹음시각 출처, 주�
 시간표 없이 먼저 `unmatched`로 들어간 녹음도 이후 시간표가 추가되면 저장된 blob을
 다시 판정해 과목 폴더로 자동 이동한다.
 
-컨테이너 배포에서는 `/data/inbox/recordings`를 3분마다 스캔한다. 첫 스캔에서는 파일을
-대기시키고 다음 스캔까지 크기와 mtime이 120초 이상 같을 때만 가져오므로 SMB 업로드 중인
-파일을 읽지 않는다. 성공한 원본은 정확한 바이트가 blob과 아카이브에 보관된 뒤 핫폴더에서
-제거된다. `deploy/timetable.toml.example`을 `/config/timetable.toml`로 복사해 편집하고
+컨테이너 배포에서는 호스트의 `YONSTUDY_RECORDING_HOST_DIR`을
+`/data/inbox/recordings`로 마운트해 3분마다 스캔한다. 휴대폰에서 접근하기 쉬운 공유 폴더를
+호스트 경로로 지정하면 된다. 첫 스캔에서는 파일을 대기시키고 다음 스캔까지 크기와 mtime이
+120초 이상 같을 때만 가져오므로 SMB 업로드 중인 파일을 읽지 않는다. 성공한 원본만 정확한
+바이트가 blob과 아카이브에 보관된 뒤 투입 폴더에서 제거되며, 실패한 파일은 재시도를 위해
+남는다. `deploy/timetable.toml.example`을 `/config/timetable.toml`로 복사해 편집하고
 `YONSTUDY_TIMETABLE=/config/timetable.toml`을 설정하면 매 스캔 전에 시간표도 갱신한다.
 
 ## systemd로 기능 켜고 끄기
@@ -520,6 +522,7 @@ systemctl list-timers 'yonstudy-*'
 | `YONSTUDY_SMTP_STARTTLS` | STARTTLS 사용 여부. 기본 `1` |
 | `YONSTUDY_SMTP_USER`, `YONSTUDY_SMTP_PASSWORD` | SMTP 인증 값 |
 | `YONSTUDY_RECORDING_INBOX` | 녹음 핫폴더. 컨테이너 기본 `/data/inbox/recordings` |
+| `YONSTUDY_RECORDING_HOST_DIR` | Docker가 마운트할 NAS의 휴대폰용 녹음 투입 폴더 |
 | `YONSTUDY_RECORDING_DESTINATION` | 분류된 녹음을 둘 평면 아카이브 루트 |
 | `YONSTUDY_RECORDING_STABLE_SECONDS` | 두 스캔 사이 파일 안정화 시간. 기본 120초 |
 | `YONSTUDY_TIMETABLE` | 매 핫폴더 스캔 전에 가져올 TOML/JSON/CSV 시간표 |
