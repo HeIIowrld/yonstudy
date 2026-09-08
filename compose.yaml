@@ -4,7 +4,7 @@ services:
   scheduler:
     image: yonstudy:local
     build:
-      context: ${YONSTUDY_SOURCE_DIR}
+      context: ${YONSTUDY_BUILD_CONTEXT}
       dockerfile: Dockerfile
     container_name: yonstudy
     restart: unless-stopped

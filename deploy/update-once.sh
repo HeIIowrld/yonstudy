@@ -4,7 +4,15 @@ set -eu
 repository="${YONSTUDY_REPOSITORY:-HeIIowrld/yonstudy}"
 source_dir=/source
 state_dir=/state
-compose="docker compose --project-directory $source_dir --env-file /deployment/.env -f $source_dir/compose.yaml"
+
+run_compose() {
+    # Compose runs inside the updater, so its client-side build context is the
+    # mounted /source path. Runtime bind mounts still come from the host .env.
+    YONSTUDY_BUILD_CONTEXT=/source docker compose \
+        --project-directory "$source_dir" \
+        --env-file /deployment/.env \
+        -f "$source_dir/compose.yaml" "$@"
+}
 
 mkdir -p "$state_dir"
 git -C "$source_dir" fetch --quiet origin main
@@ -39,15 +47,15 @@ if docker image inspect yonstudy:local >/dev/null 2>&1; then
     docker image tag yonstudy:local yonstudy:rollback
 fi
 
-if ! $compose build scheduler; then
+if ! run_compose build scheduler; then
     echo "$(date -Iseconds) image build failed for $candidate" >&2
     exit 1
 fi
-if ! $compose up -d --no-deps scheduler; then
+if ! run_compose up -d --no-deps scheduler; then
     echo "$(date -Iseconds) container replacement failed for $candidate" >&2
     if docker image inspect yonstudy:rollback >/dev/null 2>&1; then
         docker image tag yonstudy:rollback yonstudy:local
-        $compose up -d --no-deps scheduler
+        run_compose up -d --no-deps scheduler
     fi
     exit 1
 fi
@@ -58,7 +66,7 @@ if ! docker exec yonstudy python /app/cli.py --store /data/store status >/dev/nu
     if docker image inspect yonstudy:rollback >/dev/null 2>&1; then
         docker rm -f yonstudy >/dev/null 2>&1 || true
         docker image tag yonstudy:rollback yonstudy:local
-        $compose up -d --no-deps scheduler
+        run_compose up -d --no-deps scheduler
     fi
     exit 1
 fi
