@@ -6,10 +6,11 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .archive import Archiver
+from .archive import Archiver, SessionExpired
 from .client import LearnUsClient
 from .auth import ensure_session
 from .daily import SEOUL, current_term
+from .progress import progress_verified
 
 
 def _seconds_label(value: int | None) -> str | None:
@@ -27,14 +28,17 @@ def attendance_snapshot(store, *, year: str, semester: str) -> list[dict]:
         """
         SELECT c.course_id,c.name AS course_name,a.cmid,a.title,a.section_idx,
                a.section_name,a.url,a.open_from,a.open_to,a.late_until,a.completion,
-               v.duration_sec,v.watched_sec,v.progress_pct,v.is_progress,v.probed_at,
+               v.duration_sec,v.watched_sec,v.progress_pct,v.is_progress,v.status,
+               v.can_log_progress,v.probed_at,
                EXISTS(
                    SELECT 1 FROM crawl_log l
                     WHERE l.kind='playback_once' AND l.ref=CAST(v.cmid AS TEXT) AND l.ok=1
                ) AS played_once
           FROM activity a JOIN course c ON c.course_id=a.course_id
           JOIN vod v ON v.cmid=a.cmid
-         WHERE c.year=? AND c.semester=? AND a.modname='vod'
+         WHERE c.year=? AND c.semester=? AND c.enrolled=1
+           AND a.present=1 AND COALESCE(a.restricted,0)=0
+           AND a.modname='vod'
          ORDER BY c.name,a.section_idx,a.cmid
         """,
         (year, semester),
@@ -47,18 +51,29 @@ def attendance_snapshot(store, *, year: str, semester: str) -> list[dict]:
         if row.get("is_progress") == 0:
             progress_ok = bool(row.get("played_once"))
             position_ok = bool(row.get("played_once"))
-        else:
+        elif row.get("is_progress") == 1:
             progress_ok = (row.get("progress_pct") or 0) >= 100
             position_ok = bool(
                 duration is not None and watched is not None
                 and watched >= max(0, duration - 2)
             )
+        else:
+            progress_ok = False
+            position_ok = False
         row.update(
             duration_label=_seconds_label(duration),
             max_position_label=_seconds_label(watched),
             progress_ok=progress_ok,
             position_ok=position_ok,
-            verified=progress_ok and position_ok,
+            verified=(
+                bool(row.get("played_once"))
+                if row.get("is_progress") == 0
+                else (
+                    progress_verified(row.get("progress_pct"), watched, duration)
+                    if row.get("is_progress") == 1
+                    else False
+                )
+            ),
         )
         out.append(row)
     return out
@@ -71,7 +86,9 @@ def viewing_queue(store, *, year: str, semester: str, now: datetime | None = Non
     rows = attendance_snapshot(store, year=year, semester=semester)
     queue = []
     for row in rows:
-        if row.get("is_progress") == 0:
+        if row.get("is_progress") != 1:
+            continue
+        if row.get("status") != "ok" or row.get("can_log_progress") != 1:
             continue
         if row["verified"] or row.get("completion") == "y":
             continue
@@ -138,6 +155,7 @@ def run_monitor(
                 and (not course_ids or course.course_id in course_ids)
             ]
             errors = []
+            session_expired = False
             for course in courses:
                 try:
                     archiver.sync_course(
@@ -147,11 +165,17 @@ def run_monitor(
                         fetch_files=False,
                         fetch_boards=False,
                     )
+                except SessionExpired as exc:
+                    errors.append({"course": course.title, "error": str(exc)})
+                    session_expired = True
+                    break
                 except Exception as exc:
                     errors.append({"course": course.title, "error": str(exc)})
             store.commit()
             state["sync"] = {
-                "status": "ok" if not errors else "partial",
+                "status": (
+                    "error" if session_expired else "ok" if not errors else "partial"
+                ),
                 "courses": len(courses),
                 "relogged": auth.relogged,
                 "errors": errors,
@@ -162,10 +186,13 @@ def run_monitor(
     new_videos = [
         dict(row) for row in store.query(
             """
-            SELECT e.at,e.cmid,e.title,c.name AS course_name,a.open_from,a.open_to,a.url
+            SELECT e.at,e.cmid,e.course_id,e.title,c.name AS course_name,
+                   a.open_from,a.open_to,a.url
               FROM change_event e JOIN course c ON c.course_id=e.course_id
               LEFT JOIN activity a ON a.cmid=e.cmid
-             WHERE c.year=? AND c.semester=? AND e.kind='activity_discovered'
+             WHERE c.year=? AND c.semester=? AND c.enrolled=1
+               AND a.present=1 AND COALESCE(a.restricted,0)=0
+               AND e.kind='activity_discovered'
                AND a.modname='vod' AND e.at>?
              ORDER BY e.at,e.id
             """,

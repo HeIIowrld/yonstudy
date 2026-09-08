@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -106,6 +107,13 @@ def download(hls_url: str, out: Outputs, cmid: int = 0, timeout: int = 7200) -> 
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", hls_url]
     temps: list[tuple[Path, Path]] = []  # (임시, 최종)
+    frames_tmp: Path | None = None
+
+    def clean_temps() -> None:
+        for tmp, _ in temps:
+            tmp.unlink(missing_ok=True)
+        if frames_tmp is not None:
+            shutil.rmtree(frames_tmp, ignore_errors=True)
 
     if out.audio:
         out.audio.parent.mkdir(parents=True, exist_ok=True)
@@ -114,19 +122,21 @@ def download(hls_url: str, out: Outputs, cmid: int = 0, timeout: int = 7200) -> 
         temps.append((tmp, out.audio))
 
     if out.frames_dir:
-        out.frames_dir.mkdir(parents=True, exist_ok=True)
-        for old in out.frames_dir.glob("*.jpg"):
-            old.unlink()
+        out.frames_dir.parent.mkdir(parents=True, exist_ok=True)
+        frames_tmp = Path(tempfile.mkdtemp(
+            prefix=f".{out.frames_dir.name}.", dir=out.frames_dir.parent
+        ))
         cmd += [
             "-map", "0:v",
             "-vf",
-            # prev_selected_t는 첫 프레임에서 NaN이라 gte(t-NaN, gap)이 항상 거짓이 된다.
-            # isnan()을 더해 첫 장은 무조건 통과시켜야 한다.
-            f"select='gt(scene,{out.scene_threshold})"
-            f"*(isnan(prev_selected_t)+gte(t-prev_selected_t,{out.min_frame_gap}))'"
+            # 첫 장은 무조건 남기고, 이후에는 장면 변화와 최소 간격을 모두 만족한
+            # 프레임만 고른다. gt(scene)*isnan(prev_selected_t)는 첫 장면의 scene이
+            # 낮을 때 0이 되므로 isnan 항을 곱셈 밖에 둬야 한다.
+            f"select='isnan(prev_selected_t)+gt(scene,{out.scene_threshold})"
+            f"*gte(t-prev_selected_t,{out.min_frame_gap})'"
             f",scale={FRAME_WIDTH}:-2",
             "-vsync", "vfr", "-q:v", "6",
-            str(out.frames_dir / "%04d.jpg"),
+            str(frames_tmp / "%04d.jpg"),
         ]
 
     if out.video:
@@ -142,20 +152,42 @@ def download(hls_url: str, out: Outputs, cmid: int = 0, timeout: int = 7200) -> 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        for tmp, _ in temps:
-            tmp.unlink(missing_ok=True)
+        clean_temps()
         res.error = f"시간 초과 ({timeout}초)"
+        return res
+    except OSError as exc:
+        clean_temps()
+        res.error = f"ffmpeg 실행 실패: {exc}"
         return res
 
     if proc.returncode != 0:
-        for tmp, _ in temps:
-            tmp.unlink(missing_ok=True)
+        clean_temps()
         res.error = (proc.stderr or "ffmpeg 실패").strip()[:200]
         return res
 
-    for tmp, final in temps:
-        if tmp.exists():
-            tmp.rename(final)
+    missing = [
+        str(final)
+        for tmp, final in temps
+        if not tmp.is_file() or tmp.stat().st_size == 0
+    ]
+    if frames_tmp is not None and not any(frames_tmp.glob("*.jpg")):
+        missing.append(str(out.frames_dir))
+    if missing:
+        clean_temps()
+        res.error = "ffmpeg가 산출물을 만들지 않았습니다: " + ", ".join(missing)
+        return res
+
+    try:
+        for tmp, final in temps:
+            tmp.replace(final)
+        if frames_tmp is not None and out.frames_dir:
+            if out.frames_dir.exists():
+                shutil.rmtree(out.frames_dir)
+            frames_tmp.replace(out.frames_dir)
+    except OSError as exc:
+        clean_temps()
+        res.error = f"산출물 저장 실패: {exc}"
+        return res
 
     if out.audio and out.audio.exists():
         res.audio_bytes = out.audio.stat().st_size

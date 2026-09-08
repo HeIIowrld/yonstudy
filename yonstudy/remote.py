@@ -242,7 +242,9 @@ def sync_remote_tree(
     courses = store.query(
         """
         SELECT course_id,year,semester,name,title,slug
-          FROM course WHERE year=? AND semester=? ORDER BY name
+          FROM course
+         WHERE year=? AND semester=? AND enrolled=1
+         ORDER BY name
         """,
         (year, semester),
     )

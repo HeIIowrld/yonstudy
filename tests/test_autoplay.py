@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 
 from yonstudy.autoplay import build_plan
+from yonstudy.progress import progress_verified
 from yonstudy.store import Store
 
 
@@ -46,8 +47,10 @@ class AutoplayPlanTests(unittest.TestCase):
                 "duration_sec": 600,
                 "watched_sec": 0,
                 "progress_pct": 0,
+                "is_progress": 1,
                 "can_log_progress": 1,
                 "max_rate": 2.0,
+                "status": "ok",
             }
         )
         self.store.commit()
@@ -101,6 +104,119 @@ class AutoplayPlanTests(unittest.TestCase):
         )
         now = datetime(2026, 9, 3, 9, 0)
         self.assertEqual(build_plan(self.store, now=now), [])
+
+    def test_unknown_or_failed_vod_metadata_is_never_auto_played(self):
+        self.add_vod(
+            32,
+            1,
+            "2026-09-01 00:00:00",
+            "2026-09-07 23:59:59",
+        )
+        self.store.save_vod(
+            {
+                "cmid": 32,
+                "course_id": 1,
+                "is_progress": None,
+                "can_log_progress": None,
+                "status": "error",
+            }
+        )
+        self.store.commit()
+
+        self.assertEqual(
+            build_plan(self.store, now=datetime(2026, 9, 3, 9, 0)),
+            [],
+        )
+
+    def test_unenrolled_course_is_not_selected_even_when_explicitly_requested(self):
+        self.add_vod(
+            31,
+            1,
+            "2026-09-01 00:00:00",
+            "2026-09-07 23:59:59",
+        )
+        self.store.save_course({"course_id": 1, "enrolled": 0})
+        self.store.commit()
+
+        plan = build_plan(
+            self.store,
+            now=datetime(2026, 9, 3, 9, 0),
+            course_ids={1},
+        )
+
+        self.assertEqual(plan, [])
+
+    def test_removed_activity_is_not_selected(self):
+        self.add_vod(
+            33,
+            1,
+            "2026-09-01 00:00:00",
+            "2026-09-07 23:59:59",
+        )
+        self.store.db.execute(
+            "UPDATE activity SET present=0,removed_at=? WHERE cmid=33",
+            ("2026-09-02T01:00:00",),
+        )
+        self.store.commit()
+
+        self.assertEqual(
+            build_plan(self.store, now=datetime(2026, 9, 3, 9, 0)),
+            [],
+        )
+
+    def test_progress_requires_max_position_before_plan_excludes_video(self):
+        self.add_vod(
+            35,
+            1,
+            "2026-09-01 00:00:00",
+            "2026-09-07 23:59:59",
+        )
+        self.store.save_vod(
+            {
+                "cmid": 35,
+                "course_id": 1,
+                "duration_sec": 600,
+                "watched_sec": 300,
+                "progress_pct": 100,
+            }
+        )
+        self.store.commit()
+        now = datetime(2026, 9, 3, 9, 0)
+
+        self.assertEqual([job.cmid for job in build_plan(self.store, now=now)], [35])
+
+        self.store.save_vod(
+            {
+                "cmid": 35,
+                "course_id": 1,
+                "duration_sec": 600,
+                "watched_sec": 600,
+                "progress_pct": 100,
+            }
+        )
+        self.store.commit()
+        self.assertEqual(build_plan(self.store, now=now), [])
+
+    def test_zero_duration_is_not_a_verified_completion(self):
+        self.assertFalse(progress_verified(100, 0, 0))
+
+    def test_exact_deadline_precedes_random_course_order(self):
+        self.add_vod(
+            36,
+            1,
+            "2026-09-01 00:00:00",
+            "2026-09-02 10:00:00",
+        )
+        self.add_vod(
+            37,
+            2,
+            "2026-09-01 00:00:00",
+            "2026-09-02 20:00:00",
+        )
+
+        plan = build_plan(self.store, now=datetime(2026, 9, 1, 21, 0))
+
+        self.assertEqual([job.cmid for job in plan], [36, 37])
 
     def test_untracked_video_is_played_once_and_recorded_locally(self):
         self.store.save_activity(

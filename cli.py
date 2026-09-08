@@ -118,6 +118,7 @@ def cmd_archive(args) -> int:
     if args.limit:
         courses = courses[: args.limit]
     print(f"\n대상 강좌 {len(courses)}개 — 영상 본체는 받지 않습니다.")
+    exit_code = 0
     for c in courses:
         try:
             arc.sync_course(
@@ -129,17 +130,22 @@ def cmd_archive(args) -> int:
                 board_pages=args.board_pages,
             )
         except KeyboardInterrupt:
-            print("\n중단됨"); break
+            print("\n중단됨")
+            exit_code = 130
+            break
         except SessionExpired as exc:
             # 세션이 끊긴 뒤 남은 강좌를 계속 도는 건 실패 로그만 쌓는다.
             print(f"\n{exc}\n남은 {len(courses) - courses.index(c)}개 강좌를 중단합니다. "
                   "`python3 cli.py login` 후 같은 명령을 다시 실행하면 이어서 받습니다.")
+            exit_code = 1
             break
         except Exception as exc:
             print(f"  ! 실패: {exc}")
             store.log("course", str(c.course_id), False, str(exc))
+            exit_code = 1
     store.commit()
-    return cmd_status(args)
+    cmd_status(args)
+    return exit_code
 
 
 def cmd_status(args) -> int:
@@ -147,7 +153,7 @@ def cmd_status(args) -> int:
     print("\n=== 아카이브 현황 ===")
     print(f"  강좌            {s['courses']}")
     print(f"  활동            {s['activities']}")
-    print(f"  동영상          {s['vods']}  (진도 100%: {s['vods_done']})")
+    print(f"  동영상          {s['vods']}  (완주 확인: {s['vods_done']})")
     print(f"  제출활동        {s['submissions']}  (제출함: {s['submitted']})")
     print(f"  파일            {s['files']}  ({s['file_bytes']/1024/1024:.1f}MB)")
     print(f"  게시판/포럼 글  {s['posts']}  ({s['boards']}개 게시판)")
@@ -163,7 +169,7 @@ def cmd_plan(args) -> int:
     year, semester = current_term(datetime.now(SEOUL).date())
     course_ids = {
         int(row["course_id"]) for row in store.query(
-            "SELECT course_id FROM course WHERE year=? AND semester=?",
+            "SELECT course_id FROM course WHERE year=? AND semester=? AND enrolled=1",
             (year, semester),
         )
     }
@@ -191,12 +197,13 @@ def cmd_plan(args) -> int:
 def cmd_watch(args) -> int:
     from yonstudy.autoplay import build_plan, run_plan
     from yonstudy.daily import SEOUL, current_term
+    from yonstudy.progress import progress_verified
 
     store = Store(args.store)
     year, semester = current_term(datetime.now(SEOUL).date())
     course_ids = {
         int(row["course_id"]) for row in store.query(
-            "SELECT course_id FROM course WHERE year=? AND semester=?",
+            "SELECT course_id FROM course WHERE year=? AND semester=? AND enrolled=1",
             (year, semester),
         )
     }
@@ -245,7 +252,7 @@ def cmd_watch(args) -> int:
     for job in tracked:
         rows = store.query(
             """
-            SELECT v.progress_pct,a.completion
+            SELECT v.progress_pct,v.watched_sec,v.duration_sec,a.completion
               FROM vod v JOIN activity a ON a.cmid=v.cmid
              WHERE v.cmid=?
             """,
@@ -253,18 +260,22 @@ def cmd_watch(args) -> int:
         )
         row = dict(rows[0]) if rows else {}
         if not (
-            (row.get("progress_pct") or 0) >= 100
+            progress_verified(
+                row.get("progress_pct"),
+                row.get("watched_sec"),
+                row.get("duration_sec"),
+            )
             or row.get("completion") == "y"
         ):
             failed_verification.append(job.title)
     if failed_verification:
         print(
-            "재생 완료 후 진도 100%를 확인하지 못했습니다: "
+            "재생 완료 후 진도율과 최대 학습 위치의 완주를 확인하지 못했습니다: "
             + ", ".join(failed_verification),
             file=sys.stderr,
         )
         return 1
-    print(f"진도 재확인 완료: {len(tracked)}편 모두 100%")
+    print(f"진도 재확인 완료: {len(tracked)}편 모두 완주 확인")
     return 0
 
 
@@ -294,7 +305,7 @@ def cmd_report(args) -> int:
             )
             finished = str(state.get("finished_at") or "")[:10]
             sync_status = (state.get("sync") or {}).get("status")
-            sync_needed = finished != target.isoformat() or sync_status not in {"ok", "partial"}
+            sync_needed = finished != target.isoformat() or sync_status != "ok"
         except (OSError, json.JSONDecodeError):
             sync_needed = True
 
@@ -386,8 +397,8 @@ def cmd_upload(args) -> int:
             for row in store.query(
                 """
                 SELECT f.role,COUNT(*) AS count
-                  FROM file f JOIN course c ON c.course_id=f.course_id
-                 WHERE c.year=? AND c.semester=?
+                 FROM file f JOIN course c ON c.course_id=f.course_id
+                 WHERE c.year=? AND c.semester=? AND c.enrolled=1
                    AND f.role IN ('resource','post','submission','introattachment')
                  GROUP BY f.role
                 """,
@@ -398,7 +409,7 @@ def cmd_upload(args) -> int:
             """
             SELECT COUNT(*) AS count
               FROM post p JOIN course c ON c.course_id=p.course_id
-             WHERE c.year=? AND c.semester=?
+             WHERE c.year=? AND c.semester=? AND c.enrolled=1
                AND NOT (
                    p.modname='forum'
                    AND p.post_id LIKE 't%'

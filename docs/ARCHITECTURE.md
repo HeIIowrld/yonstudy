@@ -14,6 +14,7 @@ yonstudy/
 │   ├── export.py            로컬 폴더 내보내기
 │   ├── daily.py             일일 리포트와 메일
 │   ├── vod.py               HLS 산출물 추출(ffmpeg)
+│   ├── progress.py          진도율·최대 학습 위치 공통 완료 판정
 │   ├── autoplay.py          진도 스케줄러와 재생 워커(Playwright)
 │   └── studykit/
 │       ├── slides.py         PDF 슬라이드 추출, 강의안 후보 탐색
@@ -59,11 +60,13 @@ store/
 ## 데이터 모델
 
 ```sql
-course      (course_id PK, year, semester, kind, title, name, code, section, slug, archived_at)
+course      (course_id PK, year, semester, kind, title, name, code, section, slug,
+             archived_at, enrolled, unenrolled_at, detail_synced_at)
 
 activity    (cmid PK, course_id, modname, title, url,
              section_idx, section_name, indent, completion,
-             open_from, open_to, late_until, duration, restricted, seen_at)
+             open_from, open_to, late_until, duration, restricted, seen_at,
+             present, removed_at)
 
 vod         (cmid PK, course_id, uuid, hls_url, poster, subtitle_langs,
              duration_sec, watched_sec, progress_pct,
@@ -79,7 +82,8 @@ submission  (cmid PK, course_id, modname, title,
              -- assign·turnitintooltwo·vpl·quiz·feedback·choice 를 한 테이블로 모은다
 
 post        (id PK, course_id, cmid, modname, post_id, thread_id,
-             no, subject, writer, written_at, hits, replies, url, body, fetched_at)
+             no, subject, writer, written_at, hits, replies, url, body,
+             fetched_at, checked_at)
              -- ubboard(공지·Q&A)와 forum 글. UNIQUE(cmid, modname, post_id)
 
 file        (id PK, course_id, cmid, role, name, url, sha256, bytes, saved_at)
@@ -91,6 +95,11 @@ transcript  (id PK, cmid, source, lang, path, segments, created_at)
 
 crawl_log   (id PK, at, kind, ref, ok, note)
 ```
+
+강좌 목록에서 사라진 강좌는 삭제하지 않고 `enrolled=0`, 정상적으로 읽은 강좌
+페이지에서 사라진 활동은 `present=0`으로 보존한다. 따라서 과거 자료와 NAS 파일은
+남지만 현재 리포트·대기열·자동재생 후보에서는 제외된다. HTML 일부만 파싱된 경우에는
+이 상태 전환을 하지 않고 강좌 동기화 자체를 실패시킨다.
 
 ### 설계상 결정 세 가지
 

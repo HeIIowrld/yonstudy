@@ -239,6 +239,8 @@ python cli.py upload \
 업로드는 학기와 과목 폴더를 만들고 자료, 첨부파일, 게시글 Markdown을 저장한다. 같은
 경로에 같은 크기의 파일이 있으면 건너뛰며 원격 파일은 자동으로 삭제하지 않는다.
 `missing_sources`가 있으면 `archive`를 다시 실행해 로컬 원본을 채운 뒤 업로드한다.
+게시판 글과 첨부는 작성자가 본인인지와 관계없이 강좌 기록으로 NAS에 보관한다. 철회된
+강좌는 이후 업로드 대상에서 제외하지만 이미 저장한 원격 파일은 삭제하지 않는다.
 
 ```text
 2026-2/AIC2120_인공지능개론및응용/
@@ -251,6 +253,11 @@ python cli.py upload \
 ```
 
 학기 폴더는 `1학기=1`, `2학기=2`, `여름계절수업=S`, `겨울계절수업=W` 형식을 쓴다.
+
+yonstudy 자체를 Synology Container Manager에서 실행하고 GitHub의 새 버전을 자동 배포하는
+구성은 [docs/SYNOLOGY.md](docs/SYNOLOGY.md)에 정리되어 있다. 컨테이너는 기존 systemd
+타이머와 같은 한국시간 일정을 실행하며, DB·쿠키·강의 파일은 이미지 밖의 NAS 볼륨에
+보존한다.
 
 ## 일일 자동화
 
@@ -300,7 +307,8 @@ python cli.py monitor
 python cli.py monitor --course 285311 291204
 ```
 
-결과는 `store/monitor_state.json`에 저장된다.
+결과는 `store/monitor_state.json`에 저장된다. 강좌 목록 동기화에서 철회 강좌가 확인되면
+이 마지막 상태 파일의 해당 출석·대기열 행도 즉시 제거된다.
 
 ### 재생 계획과 실행
 

@@ -8,17 +8,89 @@ import os
 import re
 import time
 from dataclasses import asdict
-from urllib.parse import unquote
+from datetime import datetime, timedelta
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 from . import parse as P
 from .client import LEARNUS, LearnUsClient
 from .store import Store, _now
 
 MAX_INLINE_FILE = int(os.environ.get("YONSTUDY_MAX_FILE_MB", "512")) * 1024 * 1024
+POST_REFRESH_AFTER = timedelta(days=7)
+FORUM_REFRESH_AFTER = timedelta(days=1)
+
+
+def _activity_week(a) -> str:
+    """진도표의 주차 값과 비교할 활동 주차를 정규화한다."""
+    section_name = getattr(a, "section_name", "") or ""
+    section_idx = getattr(a, "section_idx", None)
+    match = re.search(r"(?:week\s*)?(\d{1,2})\s*(?:주차)?", section_name, re.I)
+    if match:
+        return str(int(match.group(1)))
+    return str(int(section_idx)) if section_idx is not None else ""
+
+
+def _match_progress_rows(activities, rows) -> dict[int, P.ProgressRow]:
+    """제목이 같은 강의도 주차를 포함해 안전하게 진도 행과 연결한다."""
+    vods = [a for a in activities if a.modname == "vod"]
+    buckets: dict[tuple[str, str], list[P.ProgressRow]] = {}
+    for row in rows:
+        week = str(int(row.week)) if str(row.week).isdigit() else str(row.week).strip()
+        buckets.setdefault((week, row.title.strip()), []).append(row)
+
+    matched: dict[int, P.ProgressRow] = {}
+    used: set[int] = set()
+    for activity in vods:
+        candidates = buckets.get((_activity_week(activity), activity.title.strip()), [])
+        if candidates:
+            row = candidates.pop(0)
+            matched[activity.cmid] = row
+            used.add(id(row))
+
+    # 주차 표기가 없는 강좌는 제목이 양쪽에서 하나씩만 남을 때만 연결한다.
+    remaining_rows: dict[str, list[P.ProgressRow]] = {}
+    for row in rows:
+        if id(row) not in used:
+            remaining_rows.setdefault(row.title.strip(), []).append(row)
+    remaining_vods: dict[str, list] = {}
+    for activity in vods:
+        if activity.cmid not in matched:
+            remaining_vods.setdefault(activity.title.strip(), []).append(activity)
+    for title, candidates in remaining_rows.items():
+        activities_with_title = remaining_vods.get(title, [])
+        if len(candidates) == len(activities_with_title) == 1:
+            matched[activities_with_title[0].cmid] = candidates[0]
+    return matched
+
+
+def _refresh_due(
+    value: str | None, after: timedelta = POST_REFRESH_AFTER
+) -> bool:
+    if not value:
+        return True
+    try:
+        return datetime.fromisoformat(_now()) - datetime.fromisoformat(value) >= after
+    except ValueError:
+        return True
 
 
 class SessionExpired(RuntimeError):
     """세션이 실제로 끊긴 경우. 남은 강좌를 계속 시도해 봐야 의미가 없다."""
+
+
+def _is_login_response(body: str, final_url: str = "") -> bool:
+    """로그인 리다이렉트 결과인지 본문과 최종 URL로 판정한다."""
+    path = final_url.lower().split("?", 1)[0].rstrip("/")
+    if path.endswith(("/login", "/login/index.php")):
+        return True
+    return bool(
+        re.search(r"\bclass=['\"][^'\"]*\bhtml_login\b", body, re.I)
+        or (
+            re.search(r"<form\b[^>]*\baction=['\"][^'\"]*/login/", body, re.I)
+            and re.search(r"\bname=['\"](?:username|user_id)['\"]", body, re.I)
+        )
+    )
+
 
 class Archiver:
     def __init__(
@@ -31,12 +103,29 @@ class Archiver:
         self.file_sink = file_sink
         self._user_id: str | None = None
 
+    def _request(self, url: str, **kwargs) -> str:
+        body = self.c.request(url, **kwargs)
+        if _is_login_response(body):
+            raise SessionExpired("LearnUs 세션이 만료되었습니다")
+        return body
+
+    def _get_bytes(self, url: str, **kwargs) -> tuple[bytes, str]:
+        body, final = self.c.get_bytes(url, **kwargs)
+        head = body[:16_384].decode("utf-8", "ignore")
+        if _is_login_response(head, final):
+            raise SessionExpired("LearnUs 세션이 만료되었습니다")
+        return body, final
+
     @property
     def user_id(self) -> str | None:
         """내 Moodle userid. VPL 제출 화면·포럼 내 글 조회에 필요하다."""
         if self._user_id is None:
             try:
-                self._user_id = P.find_user_id(self.c.request(f"{LEARNUS}/user/profile.php")) or ""
+                self._user_id = P.find_user_id(
+                    self._request(f"{LEARNUS}/user/profile.php")
+                ) or ""
+            except SessionExpired:
+                raise
             except Exception:
                 self._user_id = ""
         return self._user_id or None
@@ -48,17 +137,31 @@ class Archiver:
     # 강좌 목록
 
     def sync_courses(self) -> list[P.Course]:
-        page = self.c.request(
+        page = self._request(
             f"{LEARNUS}/local/ubion/user/index.php?year=all&semester=all"
         )
         if "/login/logout.php" not in page:
             raise SessionExpired("세션이 만료되었습니다. `yonstudy login`을 먼저 실행하세요.")
+        if not P.has_course_list(page):
+            raise RuntimeError("강좌 목록을 확인하지 못했습니다")
         courses = P.parse_course_list(page)
+        if not courses and self.s.query("SELECT 1 FROM course LIMIT 1"):
+            raise RuntimeError("기존 강좌가 있지만 새 강좌 목록이 비어 있어 동기화를 중단합니다")
+        synced_at = _now()
         for course in courses:
             row = asdict(course)
-            row.update(slug=course.slug, archived_at=_now())
+            row.update(
+                slug=course.slug,
+                archived_at=synced_at,
+                enrolled=1,
+                unenrolled_at=None,
+            )
             self.s.save_course(row)
+        self.s.reconcile_enrollment(
+            {course.course_id for course in courses}, synced_at=synced_at
+        )
         self.s.commit()
+        self.s.prune_monitor_state()
         self.say(f"강좌 {len(courses)}개 동기화")
         return courses
 
@@ -79,12 +182,30 @@ class Archiver:
 
         page = self._fetch_course_page(course)
         activities, _ = P.parse_course_page(page)
+        listed_cmids = P.find_activity_ids(page)
+        parsed_cmids = {activity.cmid for activity in activities}
+        if listed_cmids != parsed_cmids:
+            missing = sorted(listed_cmids - parsed_cmids)
+            raise RuntimeError(
+                "강좌 활동 목록을 완전히 해석하지 못했습니다"
+                + (f" (cmid={missing[:5]})" if missing else "")
+            )
 
+        synced_at = _now()
         for a in activities:
             row = asdict(a)
             row.pop("viewer_url", None)
-            row.update(course_id=course.course_id, restricted=int(a.restricted), seen_at=_now())
+            row.update(
+                course_id=course.course_id,
+                restricted=int(a.restricted),
+                seen_at=synced_at,
+                present=1,
+                removed_at=None,
+            )
             self.s.save_activity(row)
+        self.s.reconcile_activities(
+            course.course_id, parsed_cmids, synced_at=synced_at
+        )
         self.s.commit()
 
         counts: dict[str, int] = {}
@@ -93,24 +214,26 @@ class Archiver:
         self.say("  활동: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
 
         # 시청 시간은 강좌 페이지가 아니라 진도 리포트를 기준으로 한다.
-        progress_by_title: dict[str, P.ProgressRow] = {}
+        progress_by_cmid: dict[int, P.ProgressRow] = {}
         try:
-            rep = self.c.request(
+            rep = self._request(
                 f"{LEARNUS}/report/ubcompletion/user_progress.php?id={course.course_id}",
                 referer=course.url,
             )
             _, rows = P.parse_progress_report(rep)
-            progress_by_title = {r.title.strip(): r for r in rows}
+            progress_by_cmid = _match_progress_rows(activities, rows)
             done = sum(r.done for r in rows)
             if rows:
                 self.say(f"  진도: {done}/{len(rows)} 완료")
+        except SessionExpired:
+            raise
         except Exception as exc:  # 진도 리포트가 없는 강좌도 있다
             self.s.log("progress", str(course.course_id), False, str(exc))
 
         # 뷰어에서 HLS, 자막, 배속, 진도 기간만 확인한다.
         vods = [a for a in activities if a.modname == "vod"]
         for a in vods:
-            self._sync_vod(course, a, progress_by_title, cdir, probe_vod, fetch_subtitles)
+            self._sync_vod(course, a, progress_by_cmid, cdir, probe_vod, fetch_subtitles)
 
         # 과제 모듈마다 페이지가 달라 공통 파서로 정규화한다.
         for a in (x for x in activities if x.is_submission and not x.restricted):
@@ -132,6 +255,7 @@ class Archiver:
             for a in (x for x in activities if x.modname in P.RESOURCE_MODULES and not x.restricted):
                 self._sync_resource(course, a, cdir)
 
+        self.s.mark_course_detail_synced(course.course_id)
         self.s.commit()
         self.s.write_json(
             f"courses/{cdir}/course.json",
@@ -155,7 +279,7 @@ class Archiver:
                 page, final = "", ""
             if "/login/logout.php" in page:
                 return page
-            if "login" in final.rsplit("/", 1)[-1] or 'class="html_login"' in page:
+            if _is_login_response(page, final):
                 raise SessionExpired("LearnUs 세션이 만료되었습니다")
             if attempt < tries:
                 self.say(f"    응답 이상({last or '내용 불일치'}) — {delay:.0f}초 대기 후 재시도 {attempt}/{tries}")
@@ -174,21 +298,29 @@ class Archiver:
             raise SessionExpired("LearnUs 세션이 만료되었습니다")
         raise RuntimeError(f"강좌 페이지를 받지 못했습니다 ({last or '알 수 없는 응답'})")
 
-    def _sync_vod(self, course, a, progress_by_title, cdir, probe, fetch_subtitles) -> None:
-        prow = progress_by_title.get(a.title.strip())
+    def _sync_vod(self, course, a, progress_by_cmid, cdir, probe, fetch_subtitles) -> None:
+        prow = progress_by_cmid.get(a.cmid)
         row = {
             "cmid": a.cmid,
             "course_id": course.course_id,
-            "duration_sec": prow.duration_sec if prow else None,
-            "watched_sec": prow.watched_sec if prow else None,
-            "progress_pct": (
-                float(prow.progress.rstrip("%")) if prow and prow.progress.rstrip("%").replace(".", "").isdigit() else None
-            ),
             "probed_at": _now(),
         }
+        # 진도표 요청 실패나 일시적인 제목 불일치가 기존 진도를 NULL로 지우지 않게
+        # 실제로 대응되는 행을 찾았을 때만 진도 필드를 갱신한다.
+        if prow:
+            raw_progress = prow.progress.strip().rstrip("%").strip()
+            row.update(
+                duration_sec=prow.duration_sec,
+                watched_sec=prow.watched_sec,
+                progress_pct=(
+                    float(raw_progress)
+                    if raw_progress.replace(".", "").isdigit()
+                    else None
+                ),
+            )
         if probe:
             try:
-                html = self.c.request(a.viewer_url, referer=course.url)
+                html = self._request(a.viewer_url, referer=course.url)
                 v = P.parse_vod_viewer(html, a.cmid)
                 row.update(
                     uuid=v.uuid,
@@ -215,6 +347,8 @@ class Archiver:
                     for lang in v.subtitle_langs or ["ko"]:
                         self._fetch_subtitle(course, a, v.uuid, lang, cdir)
                 self.s.log("vod", str(a.cmid), True)
+            except SessionExpired:
+                raise
             except Exception as exc:
                 row["status"] = "error"
                 self.s.log("vod", str(a.cmid), False, str(exc))
@@ -225,7 +359,9 @@ class Archiver:
         if self.s.has_file(url, "subtitle"):
             return
         try:
-            body, _ = self.c.get_bytes(url, referer=a.viewer_url)
+            body, _ = self._get_bytes(url, referer=a.viewer_url)
+        except SessionExpired:
+            raise
         except Exception as exc:
             self.s.log("subtitle", str(a.cmid), False, str(exc))
             return
@@ -254,7 +390,9 @@ class Archiver:
     def _sync_submission(self, course, a, cdir, fetch_files) -> None:
         """제출형 활동 아카이빙 — 모듈 종류에 관계없이 같은 테이블로 모은다."""
         try:
-            html = self.c.request(a.url, referer=course.url)
+            html = self._request(a.url, referer=course.url)
+        except SessionExpired:
+            raise
         except Exception as exc:
             self.s.log(a.modname, str(a.cmid), False, str(exc))
             return
@@ -264,10 +402,12 @@ class Archiver:
             uid = P.find_user_id(html)
             if uid:
                 try:
-                    html = self.c.request(
+                    html = self._request(
                         f"{LEARNUS}/mod/vpl/forms/submissionview.php?id={a.cmid}&userid={uid}",
                         referer=a.url,
                     )
+                except SessionExpired:
+                    raise
                 except Exception as exc:
                     self.s.log("vpl", str(a.cmid), False, str(exc))
 
@@ -302,7 +442,8 @@ class Archiver:
     def _sync_board(self, course, a, cdir, max_pages: int, fetch_files: bool) -> None:
         """ubboard 게시판 — 목록을 페이지별로 훑고 새 글의 본문을 받는다.
 
-        목록은 매번 다시 읽어야 새 글을 알 수 있지만, 본문은 이미 받은 글을 건너뛴다.
+        목록은 매번 다시 읽어 새 글과 메타데이터 변경을 찾는다. 실패했거나 변경된
+        본문은 즉시 재시도하고, 오래된 본문도 주기적으로 다시 확인한다.
         """
         page_no, last_page, new_posts, total = 1, 1, 0, 0
         # 과거 용량 제한이나 일시적 오류로 첨부 blob만 비어 있을 수 있다.
@@ -311,7 +452,9 @@ class Archiver:
         while page_no <= last_page:
             url = a.url if page_no == 1 else f"{a.url}&page={page_no}"
             try:
-                html = self.c.request(url, referer=course.url)
+                html = self._request(url, referer=course.url)
+            except SessionExpired:
+                raise
             except Exception as exc:
                 self.s.log("ubboard", f"{a.cmid}p{page_no}", False, str(exc))
                 break
@@ -321,14 +464,43 @@ class Archiver:
             total += len(listing)
 
             for post in listing:
-                known_post = self.s.has_post(a.cmid, "ubboard", post.post_id)
-                if known_post and not retry_attachments:
+                existing = self.s.post_record(a.cmid, "ubboard", post.post_id)
+                known_post = existing is not None
+                listing_changed = bool(
+                    existing
+                    and any(
+                        existing[key] != getattr(post, key)
+                        for key in ("subject", "writer", "written_at", "replies")
+                    )
+                )
+                needs_refresh = bool(
+                    not existing
+                    or not existing["body"]
+                    or listing_changed
+                    or retry_attachments
+                    or (
+                        page_no == 1
+                        and _refresh_due(existing["checked_at"] or existing["fetched_at"])
+                    )
+                )
+                if not needs_refresh:
                     continue
                 try:
-                    body_html = self.c.request(post.url, referer=url)
+                    body_html = self._request(post.url, referer=url)
                     post = P.parse_ubboard_article(body_html, post)
+                except SessionExpired:
+                    raise
                 except Exception as exc:
                     self.s.log("ubboard_article", post.post_id, False, str(exc))
+                    # 목록 행만 저장하면 다음 실행부터 known_post로 분류되어 본문을
+                    # 영원히 재시도하지 못한다. 기존 정상 본문도 실패 응답으로 덮지 않는다.
+                    continue
+                if known_post and existing["body"] and not post.body:
+                    self.s.log(
+                        "ubboard_article", post.post_id, False,
+                        "기존 본문이 있지만 새 응답에서 본문을 찾지 못했습니다",
+                    )
+                    continue
                 self._save_post(course, a, post, "ubboard")
                 if not known_post:
                     new_posts += 1
@@ -344,23 +516,33 @@ class Archiver:
     def _sync_forum(self, course, a, cdir, fetch_files: bool) -> None:
         """forum — 토론 목록 → 각 토론의 모든 글."""
         try:
-            html = self.c.request(a.url, referer=course.url)
+            html = self._request(a.url, referer=course.url)
+        except SessionExpired:
+            raise
         except Exception as exc:
             self.s.log("forum", str(a.cmid), False, str(exc))
             return
         threads = P.parse_forum_discussions(html)
         saved = 0
         for thread_id, _title in threads:
-            if self.s.has_post(a.cmid, "forum", f"t{thread_id}"):
+            marker = self.s.post_record(a.cmid, "forum", f"t{thread_id}")
+            if marker and not _refresh_due(
+                marker["checked_at"] or marker["fetched_at"], FORUM_REFRESH_AFTER
+            ):
                 continue
             try:
-                page = self.c.request(
+                page = self._request(
                     f"{LEARNUS}/mod/forum/discuss.php?d={thread_id}", referer=a.url
                 )
+            except SessionExpired:
+                raise
             except Exception as exc:
                 self.s.log("forum_discuss", thread_id, False, str(exc))
                 continue
             posts = P.parse_forum_discussion(page)
+            if not posts:
+                self.s.log("forum_discuss", thread_id, False, "글 본문을 찾지 못했습니다")
+                continue
             for post in posts:
                 post.url = f"{LEARNUS}/mod/forum/discuss.php?d={thread_id}#p{post.post_id}"
                 self._save_post(course, a, post, "forum", thread_id=thread_id)
@@ -395,10 +577,12 @@ class Archiver:
         if not uid:
             return
         try:
-            html = self.c.request(
+            html = self._request(
                 f"{LEARNUS}/mod/forum/user.php?id={uid}&course={course.course_id}",
                 referer=course.url,
             )
+        except SessionExpired:
+            raise
         except Exception as exc:
             self.s.log("forum", str(course.course_id), False, str(exc))
             return
@@ -412,14 +596,25 @@ class Archiver:
         """mod/ubfile 등 자료 활동.
 
         view.php가 pluginfile로 바로 이동할 수 있어 먼저 바이트로 받고, HTML인
-        경우에만 본문에서 파일 링크를 찾는다.
+        경우에만 본문에서 파일 링크를 찾는다. ubdoc 문서 뷰어는
+        worker.php에서 원본 이름·다운로드 URL을 받아 별도로 처리한다.
         """
         # 이미 받아둔 자료면 네트워크를 아예 건드리지 않는다.
         existing = self.s.file_record(a.url, "resource")
         if self._file_is_current(course, a, existing, "resource", a.title):
             return
         try:
-            body, final = self.c.get_bytes(a.url, referer=course.url)
+            body, final = self._get_bytes(a.url, referer=course.url)
+            if urlsplit(final).path.rstrip("/") == "/local/ubdoc":
+                body, name = self._download_ubdoc(
+                    final, fallback_name=a.title
+                )
+                self._save_bytes(
+                    course, a, body, a.url, name, "resource", cdir, "materials"
+                )
+                return
+        except SessionExpired:
+            raise
         except Exception as exc:
             self.s.log("resource", str(a.cmid), False, str(exc))
             return
@@ -431,17 +626,100 @@ class Archiver:
 
         head = body[:512].lstrip().lower()
         if head.startswith(b"<!doc") or b"<html" in head:
-            for name, url in P.parse_pluginfiles(body.decode("utf-8", "ignore")):
+            page = body.decode("utf-8", "ignore")
+            viewer_url = P.find_ubfile_viewer(page)
+            if viewer_url:
+                try:
+                    _, viewer_final = self._get_bytes(
+                        viewer_url, referer=a.url
+                    )
+                    if urlsplit(viewer_final).path.rstrip("/") != "/local/ubdoc":
+                        raise RuntimeError(
+                            "ubfile 문서 뷰어가 ubdoc으로 연결되지 않았습니다"
+                        )
+                    original, name = self._download_ubdoc(
+                        viewer_final, fallback_name=a.title
+                    )
+                    self._save_bytes(
+                        course, a, original, a.url, name,
+                        "resource", cdir, "materials",
+                    )
+                except SessionExpired:
+                    raise
+                except Exception as exc:
+                    self.s.log("resource", str(a.cmid), False, str(exc))
+                return
+            for name, url in P.parse_pluginfiles(page):
                 self._fetch_file(course, a, url, name, "resource", cdir, "materials")
         else:
             self._save_bytes(course, a, body, a.url, a.title, "resource", cdir, "materials")
+
+    def _download_ubdoc(
+        self, viewer_url: str, *, fallback_name: str
+    ) -> tuple[bytes, str]:
+        """Coursemos ubdoc 뷰어에서 다운로드가 허용된 원본을 받는다."""
+        parsed = urlsplit(viewer_url)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        params = {
+            key: (query.get(key) or [""])[0]
+            for key in ("id", "tp", "pg", "item", "fid")
+        }
+        if not params["id"]:
+            raise RuntimeError("ubdoc 문서 ID가 없습니다")
+
+        result_text = self._request(
+            urljoin(viewer_url, "/local/ubdoc/worker.php"),
+            data={"job": "checkState", **params},
+            referer=viewer_url,
+        )
+        try:
+            result = json.loads(result_text)
+            state = int(result.get("state_code"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("ubdoc 문서 상태 응답을 해석하지 못했습니다") from exc
+
+        if state == 100:
+            if str(result.get("file_download", "0")) != "1":
+                raise RuntimeError("ubdoc 원본 다운로드가 허용되지 않았습니다")
+            download_url = result.get("file_url")
+            path = "/local/ubdoc/download.php"
+            name = (
+                result.get("file_realname")
+                or result.get("file_name")
+                or fallback_name
+            )
+        elif state == 300:
+            # 뷰어 변환이 불가능한 파일은 공식 UI도 adownload로
+            # 원본 다운로드 링크를 노출한다.
+            download_url = None
+            path = "/local/ubdoc/adownload.php"
+            name = result.get("file_name") or fallback_name
+        else:
+            message = result.get("state_message") or f"상태 {state}"
+            raise RuntimeError(f"ubdoc 문서가 준비되지 않았습니다: {message}")
+
+        if not download_url:
+            download_url = urlunsplit(
+                (parsed.scheme, parsed.netloc, path, parsed.query, "")
+            )
+        download_url = urljoin(viewer_url, str(download_url))
+        target = urlsplit(download_url)
+        if target.scheme not in {"http", "https"} or target.netloc != parsed.netloc:
+            raise RuntimeError("ubdoc 다운로드 URL의 출처가 올바르지 않습니다")
+
+        body, _ = self._get_bytes(download_url, referer=viewer_url)
+        if not body:
+            raise RuntimeError("ubdoc 원본 파일이 비어 있습니다")
+        return body, str(name)
 
     def _fetch_file(self, course, a, url, name, role, cdir, subdir) -> None:
         existing = self.s.file_record(url, role)
         if self._file_is_current(course, a, existing, role, name):
             return
         try:
-            body, _ = self.c.get_bytes(url, referer=a.url)
+            body, _ = self._get_bytes(url, referer=a.url)
+        except SessionExpired:
+            raise
         except Exception as exc:
             self.s.log("file", url[:120], False, str(exc))
             return

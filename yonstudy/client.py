@@ -251,14 +251,15 @@ class LearnUsClient:
             opener = urllib.request.build_opener(
                 urllib.request.HTTPCookieProcessor(self.jar), _NoRedirect
             )
-        try:
-            def go():
-                with opener.open(req, timeout=TIMEOUT) as resp:
-                    return resp.read().decode("utf-8", "ignore")
 
-            return self._guard(go)
-        except urllib.error.HTTPError as exc:
-            return exc.read().decode("utf-8", "ignore")
+        def go():
+            with opener.open(req, timeout=TIMEOUT) as resp:
+                return resp.read().decode("utf-8", "ignore")
+
+        # 오류 페이지를 정상 HTML로 넘기면 호출자가 이를 빈 게시판이나 미제출
+        # 상태로 해석해 기존 데이터를 덮어쓸 수 있다. fetch/get_bytes와 마찬가지로
+        # HTTP 상태 오류는 호출자에게 전달한다.
+        return self._guard(go)
 
     # SSO 로그인
 
@@ -357,5 +358,7 @@ class LearnUsClient:
         return alive, (m.group(1) if m else None)
 
     def save(self) -> None:
+        parent = os.path.dirname(os.path.abspath(self.cookie_path))
+        os.makedirs(parent, mode=0o700, exist_ok=True)
         self.jar.save(ignore_discard=True, ignore_expires=True)
         os.chmod(self.cookie_path, 0o600)

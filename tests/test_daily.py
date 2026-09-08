@@ -54,7 +54,11 @@ class DailyReportTests(unittest.TestCase):
     def test_opened_completion_transition_and_deduplication(self):
         self.store.save_activity(self.activity("n"))
         self.store.save_vod(
-            {"cmid": 10, "course_id": 1, "progress_pct": 50, "duration_sec": 600}
+            {
+                "cmid": 10, "course_id": 1, "progress_pct": 50,
+                "duration_sec": 600, "is_progress": 1,
+                "can_log_progress": 1, "status": "ok",
+            }
         )
         self.store.save_activity(self.activity("y"))
         self.store.save_vod(
@@ -82,6 +86,51 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(report.completion_by_course[0]["incomplete"], 0)
         self.assertEqual(report.completion_by_course[0]["untracked"], 1)
         self.assertEqual(report.untracked[0]["modname"], "ubfile")
+
+    def test_unenrolled_course_is_excluded_from_incomplete_counts(self):
+        self.store.save_activity(self.activity("n"))
+        self.store.save_vod(
+            {
+                "cmid": 10,
+                "course_id": 1,
+                "progress_pct": 0,
+                "watched_sec": 0,
+                "duration_sec": 600,
+                "is_progress": 1,
+                "can_log_progress": 1,
+                "status": "ok",
+            }
+        )
+        self.store.save_course({"course_id": 1, "enrolled": 0})
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+
+        self.assertEqual(report.todos, [])
+        self.assertEqual(report.viewing_queue, [])
+        self.assertEqual(report.attendance, [])
+        self.assertEqual(report.completion_by_course, [])
+
+    def test_freshness_requires_every_enrolled_course_to_be_current(self):
+        day = self.today.isoformat()
+        self.store.save_activity(self.activity("n"))
+        self.store.save_course({
+            "course_id": 2, "year": self.year, "semester": self.semester,
+            "name": "동기화 누락 과목", "title": "동기화 누락 과목",
+        })
+        self.store.save_activity({
+            "cmid": 20, "course_id": 2, "modname": "url", "title": "오래된 활동",
+            "completion": None, "restricted": 0,
+            "seen_at": "2026-01-01T00:00:00",
+        })
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+
+        self.assertTrue(report.stale)
+        self.assertEqual(report.source_updated_at, "2026-01-01T00:00:00")
+        self.assertTrue(any(row["course_name"] == "동기화 누락 과목"
+                            for row in report.completion_by_course))
 
     def test_new_qna_and_material_are_separate_sections(self):
         day = self.today.isoformat()
@@ -146,6 +195,9 @@ class DailyReportTests(unittest.TestCase):
                 "duration_sec": 600,
                 "watched_sec": 120,
                 "max_rate": 2.0,
+                "is_progress": 1,
+                "can_log_progress": 1,
+                "status": "ok",
             }
         )
         self.store.commit()
@@ -165,6 +217,7 @@ class DailyReportTests(unittest.TestCase):
         self.store.save_vod({
             "cmid": 10, "course_id": 1, "progress_pct": 50,
             "duration_sec": 600, "watched_sec": 300,
+            "is_progress": 1, "can_log_progress": 1, "status": "ok",
         })
         self.store.save_activity({
             "cmid": 30, "course_id": 1, "modname": "assign", "title": "오늘 과제",
@@ -191,6 +244,30 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn("과목별 동영상 수강률", html_body)
         self.assertNotIn("ubboard", html_body)
         self.assertIn("현재 남은 항목", render_email_text(report))
+
+    def test_report_does_not_count_percent_only_video_as_complete(self):
+        self.store.save_activity(self.activity("n"))
+        self.store.save_vod(
+            {
+                "cmid": 10,
+                "course_id": 1,
+                "progress_pct": 100,
+                "duration_sec": 600,
+                "watched_sec": 300,
+                "is_progress": 1,
+                "can_log_progress": 1,
+                "status": "ok",
+            }
+        )
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+
+        self.assertFalse(report.attendance[0]["verified"])
+        self.assertEqual([row["cmid"] for row in report.todos], [10])
+        self.assertEqual(report.completion_by_course[0]["effective_done"], 0)
+        self.assertEqual(report.completion_by_course[0]["effective_incomplete"], 1)
+        self.assertIn("확인 필요", render_email_text(report))
 
     def test_email_lists_full_term_videos_but_excludes_future_from_rate(self):
         day = self.today.isoformat()
@@ -219,6 +296,9 @@ class DailyReportTests(unittest.TestCase):
                     "progress_pct": progress,
                     "duration_sec": 600,
                     "watched_sec": watched,
+                    "is_progress": 1,
+                    "can_log_progress": 1,
+                    "status": "ok",
                 }
             )
         self.store.commit()

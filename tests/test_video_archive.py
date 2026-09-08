@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from yonstudy.store import Store
-from yonstudy.video_archive import archive_untracked_vods
+from yonstudy.video_archive import archive_untracked_vods, candidates
 
 
 class FakeSink:
@@ -25,6 +25,31 @@ class FakeSink:
 
 
 class ArchiveOnlyVideoTests(unittest.TestCase):
+    def test_withdrawn_course_video_is_not_an_archive_candidate(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course({
+                "course_id": 1, "year": "2026", "semester": "2학기",
+                "name": "철회 강좌", "title": "철회 강좌", "slug": "OLD",
+                "enrolled": 0,
+            })
+            store.save_activity({
+                "cmid": 10, "course_id": 1, "modname": "vod",
+                "title": "옛 영상", "url": "https://example.test/vod/10",
+                "restricted": 0,
+            })
+            store.save_vod({
+                "cmid": 10, "course_id": 1,
+                "hls_url": "https://cdn/10.m3u8",
+                "is_progress": 0, "status": "ok",
+            })
+            store.commit()
+
+            self.assertEqual(
+                candidates(store, year="2026", semester="2학기"),
+                [],
+            )
+
     def test_only_untracked_video_is_archived_once(self):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)

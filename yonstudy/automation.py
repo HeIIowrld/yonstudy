@@ -8,7 +8,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from .archive import Archiver
+from .archive import Archiver, SessionExpired
 from .auth import ensure_session
 from .client import LearnUsClient
 from .daily import (
@@ -83,6 +83,9 @@ def run_daily_automation(
                         fetch_boards=True,
                         board_pages=3,
                     )
+                except SessionExpired as exc:
+                    errors.append({"course": course.title, "error": str(exc)})
+                    break
                 except Exception as exc:
                     errors.append({"course": course.title, "error": str(exc)})
             store.commit()
@@ -212,9 +215,11 @@ def run_scheduled_watch(
 
     systemd의 RandomizedDelaySec는 서버 부하와 DB 작업 충돌을 분산하는 용도다.
     여기서는 정상 마감(open_to)이 지난 영상은 지각기간이 남아 있어도 자동 재생하지
-    않고, 실제 재생 뒤 LearnUs 진도 리포트를 다시 읽어 100% 반영까지 검증한다.
+    않고, 실제 재생 뒤 LearnUs 진도 리포트를 다시 읽어 진도율과 최대 학습 위치를
+    함께 검증한다.
     """
     from .autoplay import build_plan, run_plan
+    from .progress import progress_verified
 
     now = datetime.now(SEOUL)
     target = now.date()
@@ -241,7 +246,7 @@ def run_scheduled_watch(
         return code, state
 
     course_rows = store.query(
-        "SELECT course_id FROM course WHERE year=? AND semester=?",
+        "SELECT course_id FROM course WHERE year=? AND semester=? AND enrolled=1",
         (year, semester),
     )
     course_ids = {int(r["course_id"]) for r in course_rows}
@@ -349,7 +354,7 @@ def run_scheduled_watch(
     for job in selected:
         rows = store.query(
             """
-            SELECT v.progress_pct,v.watched_sec,a.completion
+            SELECT v.progress_pct,v.watched_sec,v.duration_sec,a.completion
               FROM vod v JOIN activity a ON a.cmid=v.cmid
              WHERE v.cmid=?
             """,
@@ -358,7 +363,11 @@ def run_scheduled_watch(
         row = dict(rows[0]) if rows else {}
         if job.tracks_progress:
             ok = bool(
-                (row.get("progress_pct") or 0) >= 100
+                progress_verified(
+                    row.get("progress_pct"),
+                    row.get("watched_sec"),
+                    row.get("duration_sec"),
+                )
                 or row.get("completion") == "y"
             )
             verification_source = "learnus_progress"

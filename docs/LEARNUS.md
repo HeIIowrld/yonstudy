@@ -84,7 +84,7 @@ yontil 확장(`src/core/login/login-learnus.ts`)의 플로우를 이식했다.
 | 모듈 | 개수 | 성격 | 수집 방법 |
 |---|---:|---|---|
 | `vod` | 697 | 동영상 강의 | 뷰어 파싱 |
-| `ubfile` | 551 | 자료 파일 | **view.php가 pluginfile로 직접 리다이렉트** (HTML 아님) |
+| `ubfile` | 551 | 자료 파일 | view.php가 pluginfile로 직접 리다이렉트하거나 `local/ubdoc` 문서 뷰어로 이동. 뷰어는 `worker.php`의 허용 상태와 원본 URL을 확인한 뒤 다운로드 |
 | `assign` | 229 | 과제 | `generaltable`의 Submission status |
 | `ubboard` | 194 | 게시판·공지 | 목록 → 글 (아래 참고) |
 | `quiz` | 81 | 퀴즈 | `review.php?attempt=` 링크 수 |
@@ -99,6 +99,11 @@ yontil 확장(`src/core/login/login-learnus.ts`)의 플로우를 이식했다.
 | `lti` / `choice` | 2 / 2 | 외부도구 / 선택설문 | 메타만 |
 
 `label`(82)은 설명 텍스트라 활동에서 제외한다.
+
+`local/ubdoc`는 HTML 뷰어 자체를 파일로 저장하지 않는다. 같은 세션과 Referer로
+`/local/ubdoc/worker.php`의 `checkState`를 호출하고 `file_download=1`인 경우에만 서버가
+준 동일 출처 `file_url`을 원본 파일명으로 받는다. 다운로드 금지 응답과 외부 호스트 URL은
+우회하지 않는다.
 
 **설치되지 않은 모듈**: `mod/attendance`, `mod/ubquiz` — 출석은 `report/ubcompletion`이 담당.
 

@@ -18,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/root/ys.learnus.org_cookies.txt /root/yonstudy/store
+ReadWritePaths=/root/yonstudy/store
 
 [Install]
 WantedBy=multi-user.target

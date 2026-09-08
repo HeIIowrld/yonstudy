@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .progress import progress_verified
+
 
 SEOUL = ZoneInfo("Asia/Seoul")
 
@@ -24,7 +26,10 @@ CREATE TABLE IF NOT EXISTS course (
     course_id INTEGER PRIMARY KEY,
     year TEXT, semester TEXT, kind TEXT,
     title TEXT, name TEXT, code TEXT, section TEXT,
-    slug TEXT, archived_at TEXT
+    slug TEXT, archived_at TEXT,
+    enrolled INTEGER NOT NULL DEFAULT 1,
+    unenrolled_at TEXT,
+    detail_synced_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS activity (
@@ -33,7 +38,9 @@ CREATE TABLE IF NOT EXISTS activity (
     section_idx INTEGER, section_name TEXT,
     indent INTEGER, completion TEXT,
     open_from TEXT, open_to TEXT, late_until TEXT, duration TEXT, restricted INTEGER,
-    seen_at TEXT
+    seen_at TEXT,
+    present INTEGER NOT NULL DEFAULT 1,
+    removed_at TEXT
 );
 
 -- 동영상 강의: 재생/진도 관련 사실만 모아둔다.
@@ -85,6 +92,7 @@ CREATE TABLE IF NOT EXISTS post (
     post_id TEXT, thread_id TEXT,
     no TEXT, subject TEXT, writer TEXT, written_at TEXT, hits TEXT,
     replies INTEGER, url TEXT, body TEXT, fetched_at TEXT,
+    checked_at TEXT,
     UNIQUE(cmid, modname, post_id)
 );
 
@@ -235,6 +243,138 @@ class Store:
     def save_course(self, row: dict) -> None:
         self._upsert("course", "course_id", row)
 
+    def reconcile_enrollment(
+        self, enrolled_course_ids: set[int], *, synced_at: str | None = None
+    ) -> None:
+        """강좌 목록 스냅샷에 없는 강좌를 비수강 상태로 전환한다.
+
+        활동과 파일은 아카이브를 위해 그대로 보존하고, 현재 목록/자동화에서만
+        제외할 수 있도록 강좌 상태만 바꾼다. 다시 목록에 나타난 강좌는
+        ``save_course``에서 수강 상태로 복원된다.
+        """
+        synced_at = synced_at or _now()
+        if enrolled_course_ids:
+            placeholders = ",".join("?" for _ in enrolled_course_ids)
+            self.db.execute(
+                f"""
+                UPDATE course
+                   SET enrolled=0,unenrolled_at=COALESCE(unenrolled_at,?)
+                 WHERE enrolled<>0 AND course_id NOT IN ({placeholders})
+                """,
+                (synced_at, *sorted(enrolled_course_ids)),
+            )
+        else:
+            self.db.execute(
+                """
+                UPDATE course
+                   SET enrolled=0,unenrolled_at=COALESCE(unenrolled_at,?)
+                 WHERE enrolled<>0
+                """,
+                (synced_at,),
+            )
+
+    def reconcile_activities(
+        self,
+        course_id: int,
+        present_cmids: set[int],
+        *,
+        synced_at: str | None = None,
+    ) -> None:
+        """정상적으로 파싱한 강좌 스냅샷에서 사라진 활동을 비활성화한다."""
+        synced_at = synced_at or _now()
+        params: tuple = (synced_at, course_id)
+        clause = ""
+        if present_cmids:
+            placeholders = ",".join("?" for _ in present_cmids)
+            clause = f" AND cmid NOT IN ({placeholders})"
+            params += tuple(sorted(present_cmids))
+        self.db.execute(
+            f"""
+            UPDATE activity
+               SET present=0,removed_at=COALESCE(removed_at,?)
+             WHERE course_id=? AND present<>0{clause}
+            """,
+            params,
+        )
+
+    def mark_course_detail_synced(
+        self, course_id: int, *, synced_at: str | None = None
+    ) -> None:
+        self.db.execute(
+            "UPDATE course SET detail_synced_at=? WHERE course_id=?",
+            (synced_at or _now(), course_id),
+        )
+
+    def prune_monitor_state(self) -> None:
+        """마지막 monitor 결과에서도 철회 강좌 행을 즉시 제거한다.
+
+        ``monitor_state.json``은 이력 파일이지만 외부 상태판이 그대로 표시할 수
+        있으므로, 강좌 목록만 갱신한 직후에도 이미 비수강 처리된 강좌가 대기열에
+        남지 않게 한다. 손상된 상태 파일은 건드리지 않는다.
+        """
+        path = self.root / "monitor_state.json"
+        if not path.is_file():
+            return
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(state, dict):
+            return
+
+        active_courses = {
+            int(row["course_id"])
+            for row in self.query("SELECT course_id FROM course WHERE enrolled=1")
+        }
+        active_cmids = {
+            int(row["cmid"])
+            for row in self.query(
+                """
+                SELECT a.cmid
+                  FROM activity a JOIN course c ON c.course_id=a.course_id
+                 WHERE c.enrolled=1 AND a.present=1
+                """
+            )
+        }
+
+        changed = False
+
+        def number(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        for key in ("new_videos", "viewing_queue", "attendance"):
+            rows = state.get(key)
+            if not isinstance(rows, list):
+                continue
+            kept = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                course_id = number(row.get("course_id"))
+                cmid = number(row.get("cmid"))
+                keep = (
+                    course_id is not None and course_id in active_courses
+                ) or (
+                    course_id is None and cmid is not None and cmid in active_cmids
+                )
+                if keep:
+                    kept.append(row)
+            if len(kept) != len(rows):
+                state[key] = kept
+                changed = True
+        if not changed:
+            return
+        state["roster_reconciled_at"] = _now()
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
     def save_activity(self, row: dict) -> None:
         old = self.db.execute(
             "SELECT * FROM activity WHERE cmid=?", (row["cmid"],)
@@ -268,25 +408,55 @@ class Store:
 
     def save_vod(self, row: dict) -> None:
         old = self.db.execute(
-            "SELECT progress_pct FROM vod WHERE cmid=?", (row["cmid"],)
+            "SELECT progress_pct,watched_sec,duration_sec FROM vod WHERE cmid=?",
+            (row["cmid"],),
         ).fetchone()
-        old_pct = old["progress_pct"] if old else None
-        new_pct = row.get("progress_pct")
-        if old is not None and (old_pct or 0) < 100 and (new_pct or 0) >= 100:
+        old_done = bool(
+            old
+            and progress_verified(
+                old["progress_pct"], old["watched_sec"], old["duration_sec"]
+            )
+        )
+        new_pct = row.get("progress_pct", old["progress_pct"] if old else None)
+        new_watched = row.get("watched_sec", old["watched_sec"] if old else None)
+        new_duration = row.get("duration_sec", old["duration_sec"] if old else None)
+        new_done = progress_verified(new_pct, new_watched, new_duration)
+        completion = self.db.execute(
+            "SELECT completion FROM activity WHERE cmid=?", (row["cmid"],)
+        ).fetchone()
+        # 완료 체크가 함께 올라온 경우에는 그 신호를 인정한다. 다만 이후의 부분
+        # 갱신마다 같은 이벤트를 만들지 않도록 진도율이 100%에 도달한 순간만 본다.
+        reached_pct_with_completion = bool(
+            old
+            and (old["progress_pct"] or 0) < 100
+            and (new_pct or 0) >= 100
+            and completion
+            and completion["completion"] == "y"
+        )
+        if old is not None and not old_done and (
+            new_done or reached_pct_with_completion
+        ):
             title = self.db.execute(
                 "SELECT title FROM activity WHERE cmid=?", (row["cmid"],)
             ).fetchone()
             self.record_change(
                 "vod_completed", row.get("course_id"), row["cmid"],
-                title[0] if title else None, str(old_pct or 0), str(new_pct), None,
+                title[0] if title else None, "0", "1",
+                {
+                    "progress_pct": new_pct,
+                    "watched_sec": new_watched,
+                    "duration_sec": new_duration,
+                },
             )
         self._upsert("vod", "cmid", row)
 
     def save_post(self, row: dict) -> None:
         row = dict(row)
-        row.setdefault("fetched_at", _now())
+        now = _now()
+        row.setdefault("fetched_at", now)
+        row.setdefault("checked_at", now)
         old = self.db.execute(
-            "SELECT 1 FROM post WHERE cmid=? AND modname=? AND post_id=?",
+            "SELECT fetched_at FROM post WHERE cmid=? AND modname=? AND post_id=?",
             (row.get("cmid"), row.get("modname"), row.get("post_id")),
         ).fetchone()
         # forum의 t123 행은 토론 수집 완료를 나타내는 내부 마커다.
@@ -300,6 +470,10 @@ class Store:
                 row.get("subject"), None, row.get("written_at"),
                 {"url": row.get("url"), "writer": row.get("writer")},
             )
+        elif old is not None and old["fetched_at"]:
+            # fetched_at은 일일 리포트에서 최초 발견일로 사용한다. 주기적인 본문
+            # 재확인이 과거 글을 새 글로 다시 알리지 않도록 발견 시각은 보존한다.
+            row["fetched_at"] = old["fetched_at"]
         cols = ", ".join(row)
         marks = ", ".join("?" * len(row))
         self.db.execute(
@@ -307,13 +481,13 @@ class Store:
         )
 
     def has_post(self, cmid: int, modname: str, post_id: str) -> bool:
-        return (
-            self.db.execute(
-                "SELECT 1 FROM post WHERE cmid=? AND modname=? AND post_id=?",
-                (cmid, modname, post_id),
-            ).fetchone()
-            is not None
-        )
+        return self.post_record(cmid, modname, post_id) is not None
+
+    def post_record(self, cmid: int, modname: str, post_id: str):
+        return self.db.execute(
+            "SELECT * FROM post WHERE cmid=? AND modname=? AND post_id=?",
+            (cmid, modname, post_id),
+        ).fetchone()
 
     def save_submission(self, row: dict) -> None:
         old = self.db.execute(
@@ -409,7 +583,16 @@ class Store:
             "courses": q("SELECT COUNT(*) FROM course"),
             "activities": q("SELECT COUNT(*) FROM activity"),
             "vods": q("SELECT COUNT(*) FROM vod"),
-            "vods_done": q("SELECT COUNT(*) FROM vod WHERE progress_pct>=100"),
+            "vods_done": q(
+                """
+                SELECT COUNT(*)
+                  FROM vod v LEFT JOIN activity a ON a.cmid=v.cmid
+                 WHERE a.completion='y'
+                    OR (v.progress_pct>=100 AND v.duration_sec>0
+                        AND v.watched_sec IS NOT NULL
+                        AND v.watched_sec>=MAX(0,v.duration_sec-2))
+                """
+            ),
             "submissions": q("SELECT COUNT(*) FROM submission"),
             "submitted": q("SELECT COUNT(*) FROM submission WHERE submitted=1"),
             "files": q("SELECT COUNT(*) FROM file"),

@@ -1,0 +1,41 @@
+name: yonstudy
+
+services:
+  scheduler:
+    image: ghcr.io/hellowrld/yonstudy:latest
+    container_name: yonstudy
+    restart: unless-stopped
+    init: false
+    environment:
+      TZ: Asia/Seoul
+    volumes:
+      - ${YONSTUDY_DATA_DIR}/store:/data/store
+      - ${YONSTUDY_DATA_DIR}/logs:/data/logs
+      - ${YONSTUDY_CONFIG_DIR}:/config:ro
+      - ${YONSTUDY_ARCHIVE_DIR}:/archive
+    shm_size: 1gb
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  updater:
+    image: containrrr/watchtower:1.7.1
+    container_name: yonstudy-updater
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Seoul
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_ROLLING_RESTART: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"

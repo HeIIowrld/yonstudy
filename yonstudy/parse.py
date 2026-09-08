@@ -6,7 +6,7 @@ import html as html_mod
 import json
 import re
 from dataclasses import dataclass, field
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 
 LEARNUS = "https://ys.learnus.org"
 
@@ -22,7 +22,10 @@ def text(fragment: str) -> str:
 
 
 def _cells(row: str) -> list[str]:
-    return [text(c) for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
+    return [
+        text(c)
+        for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S | re.I)
+    ]
 
 
 # 강좌 목록: /local/ubion/user/index.php
@@ -52,27 +55,56 @@ class Course:
 _COURSE_TITLE = re.compile(r"^(.*?)\s*\(([A-Za-z0-9]+)\.(\d+)-(\d+)\)$")
 
 
+def _course_list_body(page: str) -> str | None:
+    """class 순서·추가 class·따옴표 변화와 무관하게 강좌 tbody를 찾는다."""
+    for match in re.finditer(r"<tbody\b([^>]*)>(.*?)</tbody>", page, re.S | re.I):
+        class_attr = re.search(
+            r"\bclass\s*=\s*(['\"])(.*?)\1", match.group(1), re.S | re.I
+        )
+        if class_attr and "my-course-lists" in class_attr.group(2).split():
+            return match.group(2)
+    return None
+
+
+def has_course_list(page: str) -> bool:
+    return _course_list_body(page) is not None
+
+
 def parse_course_list(page: str) -> list[Course]:
-    body = re.search(r'<tbody class="my-course-lists">(.*?)</tbody>', page, re.S)
-    if not body:
+    body = _course_list_body(page)
+    if body is None:
         return []
     courses: list[Course] = []
-    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", body.group(1), re.S):
-        link = re.search(
-            r'href="[^"]*course/view\.php\?id=(\d+)"[^>]*>(.*?)</a>', row, re.S
-        )
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", body, re.S | re.I):
+        link = None
+        for anchor in re.finditer(r"<a\b([^>]*)>(.*?)</a>", row, re.S | re.I):
+            href = re.search(
+                r"\bhref\s*=\s*(['\"])(.*?)\1", anchor.group(1), re.S | re.I
+            )
+            course_id = re.search(
+                r"(?:^|/)course/view\.php\?[^'\"<>]*\bid=(\d+)",
+                html_mod.unescape(href.group(2)) if href else "",
+                re.I,
+            )
+            if course_id:
+                link = (course_id.group(1), anchor.group(2))
+                break
         if not link:
             continue
         cells = _cells(row)
-        badge = re.search(r'class="badge[^"]*">([^<]*)<', row)
-        title = text(link.group(2))
+        badge = re.search(
+            r"\bclass\s*=\s*(['\"])[^'\"]*\bbadge\b[^'\"]*\1[^>]*>([^<]*)<",
+            row,
+            re.I,
+        )
+        title = text(link[1])
         m = _COURSE_TITLE.match(title)
         courses.append(
             Course(
-                course_id=int(link.group(1)),
+                course_id=int(link[0]),
                 year=cells[0] if cells else "",
                 semester=cells[1] if len(cells) > 1 else "",
-                kind=text(badge.group(1)) if badge else "",
+                kind=text(badge.group(2)) if badge else "",
                 title=title,
                 name=m.group(1) if m else title,
                 code=m.group(2) if m else None,
@@ -80,6 +112,25 @@ def parse_course_list(page: str) -> list[Course]:
             )
         )
     return courses
+
+
+def find_activity_ids(page: str) -> set[int]:
+    """파서 완전성 검증용으로 HTML에 표시된 비-label 활동 ID를 찾는다."""
+    found: set[int] = set()
+    for match in re.finditer(r"<li\b([^>]*)>", page, re.I):
+        attrs = match.group(1)
+        module_id = re.search(
+            r"\bid\s*=\s*(['\"])module-(\d+)\1", attrs, re.I
+        )
+        if not module_id:
+            continue
+        class_attr = re.search(
+            r"\bclass\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I
+        )
+        classes = set(class_attr.group(2).split()) if class_attr else set()
+        if "modtype_label" not in classes and "label" not in classes:
+            found.add(int(module_id.group(2)))
+    return found
 
 
 def parse_semester_options(page: str) -> dict[str, list[str]]:
@@ -164,30 +215,51 @@ class Activity:
 
 
 _ACTIVITY_LI = re.compile(
-    r'<li class="activity\s+(\w+)\s+modtype_\w+[^"]*"\s+id="module-(\d+)"(.*?)</li>', re.S
+    r"""<li\b
+        (?=[^>]*\bclass\s*=\s*(['"])[^'"]*\bactivity\b[^'"]*\1)
+        (?=[^>]*\bid\s*=\s*(['"])module-(\d+)\2)
+        ([^>]*)>(.*?)</li>
+    """,
+    re.S | re.I | re.X,
 )
 _PERIOD = re.compile(
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*~\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 )
 
 
-_INSTANCE = re.compile(r'class="instancename">(.*?)</span>\s*</a>', re.S)
-_ACCESSHIDE = re.compile(r'<span class="accesshide[^"]*"[^>]*>.*?</span>', re.S)
+_ACCESSHIDE = re.compile(
+    r"""<span\b
+        (?=[^>]*\bclass\s*=\s*(['"])[^'"]*\baccesshide\b[^'"]*\1)
+        [^>]*>.*?</span>
+    """,
+    re.S | re.I | re.X,
+)
 
 
 def _instance_name(blob: str) -> str:
     """accesshide 라벨을 제외한 활동 제목을 반환한다."""
-    m = re.search(r'class="instancename">(.*?)</span>', _ACCESSHIDE.sub("", blob), re.S)
-    return text(m.group(1)) if m else ""
+    clean = _ACCESSHIDE.sub("", blob)
+    m = re.search(
+        r"""<span\b
+            (?=[^>]*\bclass\s*=\s*(['"])[^'"]*\binstancename\b[^'"]*\1)
+            [^>]*>(.*?)</span>
+        """,
+        clean,
+        re.S | re.I | re.X,
+    )
+    return text(m.group(2)) if m else ""
 
 
 def _activity_url(blob: str, modname: str, cmid: int) -> str:
-    m = re.search(r'href="(https://[^"]*/mod/\w+/(?:view|viewer)\.php\?id=\d+[^"]*)"', blob)
-    return m.group(1) if m else f"{LEARNUS}/mod/{modname}/view.php?id={cmid}"
+    for value in re.findall(r"\bhref\s*=\s*(['\"])(.*?)\1", blob, re.S | re.I):
+        url = html_mod.unescape(value[1])
+        if re.search(r"/mod/[\w-]+/(?:view|viewer)\.php\?[^#]*\bid=\d+", url, re.I):
+            return urljoin(LEARNUS, url)
+    return f"{LEARNUS}/mod/{modname}/view.php?id={cmid}"
 
 
 def _indent_depth(blob: str) -> int:
-    m = re.search(r'class="mod-indent mod-indent-(\d+)"', blob)
+    m = re.search(r"\bmod-indent-(\d+)\b", blob, re.I)
     return int(m.group(1)) if m else 0
 
 
@@ -259,12 +331,17 @@ def _period_and_duration(blob: str) -> dict:
     """
     period = _PERIOD.search(blob)
     late = _LATE.search(blob)
-    dur = re.search(r'class="text-info">\s*,?\s*(\d{1,2}(?::\d{2}){1,2})\s*<', blob)
+    dur = re.search(
+        r"""<[^>]+\bclass\s*=\s*(['"])[^'"]*\btext-info\b[^'"]*\1
+            [^>]*>\s*,?\s*(\d{1,2}(?::\d{2}){1,2})\s*<""",
+        blob,
+        re.I | re.X,
+    )
     return {
         "open_from": period.group(1) if period else None,
         "open_to": period.group(2) if period else None,
         "late_until": late.group(1) if late else None,
-        "duration": dur.group(1) if dur else None,
+        "duration": dur.group(2) if dur else None,
     }
 
 
@@ -274,13 +351,29 @@ def parse_course_page(page: str) -> tuple[list[Activity], dict]:
 
     # 섹션(주차) 경계 위치를 미리 구해 활동을 배정한다.
     sections: list[tuple[int, int, str]] = []  # (start, idx, name)
-    for m in re.finditer(
-        r'<li[^>]*id="section-(\d+)"[^>]*>(.*?)(?=<li[^>]*id="section-\d+"|\Z)',
-        page,
-        re.S,
-    ):
-        name = re.search(r'class="sectionname"[^>]*>(.*?)</', m.group(2), re.S)
-        sections.append((m.start(), int(m.group(1)), text(name.group(1)) if name else ""))
+    section_starts: list[tuple[int, int, int]] = []
+    for match in re.finditer(r"<li\b([^>]*)>", page, re.I):
+        section_id = re.search(
+            r"\bid\s*=\s*(['\"])section-(\d+)\1", match.group(1), re.I
+        )
+        if section_id:
+            section_starts.append((match.start(), match.end(), int(section_id.group(2))))
+    for index, (start, content_start, section_idx) in enumerate(section_starts):
+        content_end = (
+            section_starts[index + 1][0]
+            if index + 1 < len(section_starts)
+            else len(page)
+        )
+        blob = page[content_start:content_end]
+        name = re.search(
+            r"""<[^>]+\bclass\s*=\s*(['"])[^'"]*\bsectionname\b[^'"]*\1
+                [^>]*>(.*?)</""",
+            blob,
+            re.S | re.I | re.X,
+        )
+        sections.append(
+            (start, section_idx, text(name.group(2)) if name else "")
+        )
 
     def section_of(pos: int) -> tuple[int | None, str]:
         found = (None, "")
@@ -292,7 +385,19 @@ def parse_course_page(page: str) -> tuple[list[Activity], dict]:
         return found
 
     for m in _ACTIVITY_LI.finditer(page):
-        modname, cmid, blob = m.group(1), int(m.group(2)), m.group(3)
+        attrs, blob = m.group(4), m.group(5)
+        class_attr = re.search(
+            r"\bclass\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I
+        )
+        classes = class_attr.group(2).split() if class_attr else []
+        module_class = next(
+            (value for value in classes if value.lower().startswith("modtype_")),
+            "",
+        )
+        modname = module_class[len("modtype_"):].lower()
+        cmid = int(m.group(3))
+        if not modname:
+            continue
         if modname == "label":
             continue
         idx, sname = section_of(m.start())
@@ -851,3 +956,19 @@ def parse_pluginfiles(page: str) -> list[tuple[str, str]]:
         seen.add(url)
         out.append((text(m.group(2)) or url.rsplit("/", 1)[-1].split("?")[0], url))
     return out
+
+
+def find_ubfile_viewer(page: str) -> str | None:
+    """ubfile 래퍼의 새 창 문서 뷰어 링크를 찾는다."""
+    for _, raw_url in re.findall(
+        r"\bhref\s*=\s*(['\"])(.*?)\1", page, re.S | re.I
+    ):
+        url = urljoin(LEARNUS, html_mod.unescape(raw_url))
+        parsed = re.match(
+            r"https://ys\.learnus\.org/mod/ubfile/viewer\.php\?[^#]*\bid=\d+",
+            url,
+            re.I,
+        )
+        if parsed:
+            return url
+    return None

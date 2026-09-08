@@ -44,7 +44,8 @@ def candidates(
           FROM vod v
           JOIN activity a ON a.cmid=v.cmid
           JOIN course c ON c.course_id=v.course_id
-         WHERE c.year=? AND c.semester=?
+         WHERE c.year=? AND c.semester=? AND c.enrolled=1
+           AND a.present=1
            AND v.is_progress=0
            AND v.status='ok'
            AND v.hls_url IS NOT NULL AND v.hls_url<>''

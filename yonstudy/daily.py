@@ -15,9 +15,17 @@ from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .progress import progress_verified
+
 
 SEOUL = ZoneInfo("Asia/Seoul")
 WEEKDAYS_KO = ("월", "화", "수", "목", "금", "토", "일")
+_VOD_VERIFIED_SQL = """(
+    v.progress_pct>=100
+    AND v.duration_sec>0
+    AND v.watched_sec IS NOT NULL
+    AND v.watched_sec>=MAX(0,v.duration_sec-2)
+)"""
 
 
 def current_term(day: date) -> tuple[str, str]:
@@ -36,7 +44,7 @@ def _rows(store, sql: str, args: tuple = ()) -> list[dict]:
 
 
 def _course_filter(year: str, semester: str) -> tuple[str, tuple]:
-    return "c.year=? AND c.semester=?", (year, semester)
+    return "c.year=? AND c.semester=? AND c.enrolled=1", (year, semester)
 
 
 def _date_in(value: str | None) -> date | None:
@@ -211,27 +219,38 @@ def build_daily_report(
     horizon_s = (target + timedelta(days=horizon_days)).isoformat()
     course_sql, course_args = _course_filter(year, semester)
 
-    freshness = store.query(
+    freshness_row = store.query(
         f"""
-        SELECT MAX(a.seen_at) AS updated_at
-          FROM activity a JOIN course c ON c.course_id=a.course_id
-         WHERE {course_sql}
+        SELECT MIN(updated_at) AS updated_at,
+               SUM(CASE WHEN updated_at IS NULL THEN 1 ELSE 0 END) AS missing
+          FROM (
+                SELECT c.course_id,
+                       COALESCE(
+                           c.detail_synced_at,
+                           MAX(CASE WHEN a.present=1 THEN a.seen_at END)
+                       ) AS updated_at
+                  FROM course c
+                  LEFT JOIN activity a ON a.course_id=c.course_id
+                 WHERE {course_sql}
+                 GROUP BY c.course_id
+               ) per_course
         """,
         course_args,
-    )[0]["updated_at"]
-    stale = not freshness or not str(freshness).startswith(day_s)
+    )[0]
+    freshness = freshness_row["updated_at"]
+    stale = bool(freshness_row["missing"]) or not freshness or not str(freshness).startswith(day_s)
 
     opened = _rows(
         store,
         f"""
         SELECT a.cmid,c.name AS course_name,a.modname,a.title,a.url,
                a.open_from,a.open_to,a.late_until,a.completion,
-               v.progress_pct,s.submitted
+               v.progress_pct,v.watched_sec,v.duration_sec,s.submitted
           FROM activity a
           JOIN course c ON c.course_id=a.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
-         WHERE {course_sql} AND a.restricted=0
+         WHERE {course_sql} AND a.present=1 AND a.restricted=0
            AND substr(a.open_from,1,10)=?
          ORDER BY a.open_from,c.name,a.section_idx,a.cmid
         """,
@@ -246,7 +265,7 @@ def build_daily_report(
           FROM change_event e
           JOIN course c ON c.course_id=e.course_id
           LEFT JOIN activity a ON a.cmid=e.cmid
-         WHERE {course_sql} AND substr(e.at,1,10)=?
+         WHERE {course_sql} AND a.present=1 AND substr(e.at,1,10)=?
            AND (
                 e.kind IN ('vod_completed','submission_completed')
                 OR (e.kind='completion_changed' AND e.new_value='y')
@@ -275,7 +294,7 @@ def build_daily_report(
           FROM change_event e
           JOIN course c ON c.course_id=e.course_id
           LEFT JOIN activity a ON a.cmid=e.cmid
-         WHERE {course_sql} AND substr(e.at,1,10)=?
+         WHERE {course_sql} AND a.present=1 AND substr(e.at,1,10)=?
            AND e.kind IN ('activity_discovered','activity_updated')
          ORDER BY e.at,e.id
         """,
@@ -293,7 +312,7 @@ def build_daily_report(
           FROM post p
           JOIN course c ON c.course_id=p.course_id
           LEFT JOIN activity a ON a.cmid=p.cmid
-         WHERE {course_sql}
+         WHERE {course_sql} AND COALESCE(a.present,1)=1
            AND (substr(p.fetched_at,1,10)=? OR substr(p.written_at,1,10)=?)
          ORDER BY p.written_at,p.id
         """,
@@ -320,7 +339,7 @@ def build_daily_report(
           FROM file f
           JOIN course c ON c.course_id=f.course_id
           LEFT JOIN activity a ON a.cmid=f.cmid
-         WHERE {course_sql}
+         WHERE {course_sql} AND COALESCE(a.present,1)=1
            AND f.role IN ('resource','post','introattachment')
            AND substr(f.saved_at,1,10)=?
          ORDER BY f.saved_at,f.id
@@ -338,9 +357,10 @@ def build_daily_report(
     new_files = unique_files
     updates = event_updates
 
-    # LearnUs가 명시적으로 미완료(n)라고 표시한 항목과, 공개됐으나 진도
-    # 100% 미만인 영상을 할 일로 잡는다. 완료 추적 신호가 없는(NULL) 자료는
-    # 자동으로 미완료 취급하지 않는다.
+    # LearnUs가 명시적으로 미완료(n)라고 표시한 항목과, 공개됐으나 완주가
+    # 확인되지 않은 영상을 할 일로 잡는다. 완료 추적 신호가 없는(NULL) 자료는
+    # 자동으로 미완료 취급하지 않는다. 완료 여부는 다른 화면과 같은 기준으로
+    # 진도율과 최대 학습 위치를 함께 본다.
     todo_candidates = _rows(
         store,
         f"""
@@ -352,11 +372,14 @@ def build_daily_report(
           JOIN course c ON c.course_id=a.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
-         WHERE {course_sql} AND a.restricted=0
+         WHERE {course_sql} AND a.present=1 AND a.restricted=0
+           AND COALESCE(a.completion,'')<>'y'
+           AND COALESCE(s.submitted,0)<>1
+           AND COALESCE({_VOD_VERIFIED_SQL},0)=0
            AND (
                 a.completion='n'
                 OR (
-                    a.modname='vod' AND COALESCE(v.progress_pct,0)<100
+                    a.modname='vod'
                     AND a.open_from IS NOT NULL
                     AND substr(a.open_from,1,10)<=?
                     AND (
@@ -411,7 +434,11 @@ def build_daily_report(
     for row in opened:
         already_done = (
             row.get("completion") == "y"
-            or (row.get("progress_pct") is not None and float(row["progress_pct"]) >= 100)
+            or progress_verified(
+                row.get("progress_pct"),
+                row.get("watched_sec"),
+                row.get("duration_sec"),
+            )
             or row.get("submitted") == 1
         )
         if row["cmid"] not in scheduled_cmids and not already_done:
@@ -438,7 +465,7 @@ def build_daily_report(
           FROM submission s
           JOIN course c ON c.course_id=s.course_id
           LEFT JOIN activity a ON a.cmid=s.cmid
-         WHERE {course_sql} AND COALESCE(a.restricted,0)=0
+         WHERE {course_sql} AND a.present=1 AND COALESCE(a.restricted,0)=0
          ORDER BY c.name,COALESCE(s.due_at,a.open_to,'9999'),
                   COALESCE(a.section_idx,0),s.cmid
         """,
@@ -464,18 +491,21 @@ def build_daily_report(
                          AND v.progress_pct IS NULL AND s.submitted IS NULL
                         THEN 1 ELSE 0 END) AS no_state,
                COUNT(*) AS total,
-               SUM(CASE WHEN a.completion='y' OR v.progress_pct>=100 OR s.submitted=1
+               SUM(CASE WHEN a.completion='y' OR {_VOD_VERIFIED_SQL} OR s.submitted=1
                         THEN 1 ELSE 0 END) AS effective_done,
                SUM(CASE WHEN (a.open_from IS NULL OR substr(a.open_from,1,10)<=?)
+                              AND COALESCE(a.completion,'')<>'y'
+                              AND COALESCE(s.submitted,0)<>1
+                              AND COALESCE({_VOD_VERIFIED_SQL},0)=0
                               AND (a.completion='n'
-                                   OR (v.progress_pct IS NOT NULL AND v.progress_pct<100)
+                                   OR v.progress_pct IS NOT NULL
                                    OR s.submitted=0)
                         THEN 1 ELSE 0 END) AS effective_incomplete
           FROM course c
           JOIN activity a ON a.course_id=c.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
-         WHERE {course_sql} AND COALESCE(a.restricted,0)=0
+         WHERE {course_sql} AND a.present=1 AND COALESCE(a.restricted,0)=0
          GROUP BY c.course_id,c.name
          ORDER BY c.name
         """,
@@ -491,7 +521,7 @@ def build_daily_report(
           JOIN course c ON c.course_id=a.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
-         WHERE {course_sql} AND a.completion IS NULL
+         WHERE {course_sql} AND a.present=1 AND a.completion IS NULL
            AND COALESCE(a.restricted,0)=0
          GROUP BY c.course_id,c.name,a.modname
          ORDER BY c.name,a.modname
@@ -724,9 +754,13 @@ def _video_term_status(row: dict, target: date) -> str:
         return "공개 예정"
     if row.get("is_progress") == 0:
         return "1회 재생 완료" if row.get("played_once") else "1회 재생 필요"
+    if row.get("is_progress") != 1 or row.get("status") != "ok":
+        return "확인 필요"
     progress = float(row.get("progress_pct") or 0)
-    if row.get("completion") == "y" or progress >= 100:
+    if row.get("completion") == "y" or row.get("verified"):
         return "수강 완료"
+    if progress >= 100:
+        return "확인 필요"
     if progress > 0 or int(row.get("watched_sec") or 0) > 0:
         return "수강 중"
     return "미수강"
@@ -785,7 +819,7 @@ def _video_progress_by_course(report: DailyReport) -> list[dict]:
         course["available"] += 1
         if status in {"수강 완료", "1회 재생 완료"}:
             course["done"] += 1
-        elif status == "수강 중":
+        elif status in {"수강 중", "확인 필요"}:
             course["in_progress"] += 1
         else:
             course["not_started"] += 1

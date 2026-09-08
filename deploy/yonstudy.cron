@@ -1,0 +1,16 @@
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+TZ=Asia/Seoul
+
+# Keep the LearnUs session alive every two hours.
+25 */2 * * * root /app/deploy/run-job.sh keepalive
+
+# Refresh VOD metadata, then process at most one due lecture per window.
+0 2 * * * root /app/deploy/run-job.sh monitor
+30 2 * * * root /app/deploy/run-job.sh watch
+0 4 * * * root /app/deploy/run-job.sh watch
+30 5 * * * root /app/deploy/run-job.sh watch
+
+# Archive first; send the report after the archive job releases the lock.
+10 8 * * * root /app/deploy/run-job.sh daily
+0 9 * * * root /app/deploy/run-job.sh report

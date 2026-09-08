@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import cli
+from yonstudy.archive import SessionExpired
 from yonstudy.autoplay import Job
 from yonstudy.store import Store
 
@@ -107,6 +108,72 @@ class WatchCommandTests(unittest.TestCase):
             fake_archiver.sync_course.assert_called_once()
             progress = seed.query("SELECT progress_pct FROM vod WHERE cmid=10")
             self.assertEqual(progress[0]["progress_pct"], 100)
+
+
+class ArchiveCommandTests(unittest.TestCase):
+    def test_course_failure_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as root:
+            course = SimpleNamespace(
+                course_id=1,
+                year="2026",
+                semester="2학기",
+                title="테스트",
+            )
+            archiver = MagicMock()
+            archiver.sync_courses.return_value = [course]
+            archiver.sync_course.side_effect = RuntimeError("server failure")
+            args = SimpleNamespace(
+                store=root,
+                year=None,
+                semester=None,
+                course=None,
+                limit=None,
+                no_vod=False,
+                no_subtitles=False,
+                no_files=False,
+                no_boards=False,
+                board_pages=1,
+            )
+
+            with (
+                patch("cli.get_client", return_value=MagicMock()),
+                patch("cli.Archiver", return_value=archiver),
+            ):
+                code = cli.cmd_archive(args)
+
+            self.assertEqual(code, 1)
+
+    def test_session_expiry_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as root:
+            course = SimpleNamespace(
+                course_id=1,
+                year="2026",
+                semester="2학기",
+                title="테스트",
+            )
+            archiver = MagicMock()
+            archiver.sync_courses.return_value = [course]
+            archiver.sync_course.side_effect = SessionExpired("expired")
+            args = SimpleNamespace(
+                store=root,
+                year=None,
+                semester=None,
+                course=None,
+                limit=None,
+                no_vod=False,
+                no_subtitles=False,
+                no_files=False,
+                no_boards=False,
+                board_pages=1,
+            )
+
+            with (
+                patch("cli.get_client", return_value=MagicMock()),
+                patch("cli.Archiver", return_value=archiver),
+            ):
+                code = cli.cmd_archive(args)
+
+            self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":

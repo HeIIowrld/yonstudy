@@ -10,9 +10,11 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from random import random
 from typing import Callable
 from zoneinfo import ZoneInfo
-from random import random
+
+from .progress import progress_verified
 
 VIEWER = "https://ys.learnus.org/mod/vod/viewer.php?id={cmid}"
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -71,11 +73,12 @@ def build_plan(
 
     정렬 기준:
     1. 긴급도
-    2. 같은 긴급도 내 과목 순서 랜덤
-    3. 같은 과목 내 마감순
+    2. 같은 긴급도 내 정확한 마감순
+    3. 같은 마감 내 과목 순서 랜덤
     4. 남은 재생 시간이 긴 순
 
-    진도 추적 영상은 100% 미만이면서 현재 진도처리기간인 경우만 고른다.
+    진도 추적 영상은 진도율과 최대 학습 위치가 모두 완주를 나타내지 않으면서
+    현재 진도처리기간인 경우만 고른다.
     ``include_untracked_once``를 켜면 진도율·완료 체크가 없는 영상도 공개 후
     한 번 완주 대상으로 넣는다.
 
@@ -110,6 +113,7 @@ def build_plan(
             v.is_progress,
             v.status,
             a.title,
+            a.completion,
             a.open_from,
             a.open_to,
             a.late_until,
@@ -121,10 +125,11 @@ def build_plan(
                    AND l.ref = CAST(v.cmid AS TEXT)
                    AND l.ok = 1
             ) AS played_once
-          FROM vod v
-          JOIN activity a ON a.cmid = v.cmid
+         FROM vod v
+         JOIN activity a ON a.cmid = v.cmid
           JOIN course c ON c.course_id = v.course_id
-         WHERE COALESCE(v.progress_pct, 0) < 100
+         WHERE c.enrolled=1 AND a.present=1
+           AND COALESCE(a.restricted,0)=0
          {course_clause}
         """,
         params,
@@ -152,7 +157,19 @@ def build_plan(
             and (end is None or now <= end)
         )
 
-        tracks_progress = row["is_progress"] != 0
+        # 뷰어 조회 실패·구형 DB의 NULL을 진도 추적 영상으로
+        # 추측해 자동 재생하지 않는다.
+        if row["is_progress"] not in (0, 1):
+            continue
+        tracks_progress = row["is_progress"] == 1
+
+        if tracks_progress and (
+            row["completion"] == "y"
+            or progress_verified(
+                row["progress_pct"], row["watched_sec"], row["duration_sec"]
+            )
+        ):
+            continue
 
         if not tracks_progress:
             # 진도 추적이 없는 영상은 공개 후 한 번만 재생한다.
@@ -166,16 +183,11 @@ def build_plan(
 
             open_now = True
 
-        elif row["can_log_progress"] is not None:
-            # 뷰어 판정과 정상 수강기간을 모두 만족해야 한다.
+        elif row["status"] == "ok" and row["can_log_progress"] == 1:
+            # 뷰어가 성공적으로 진도 처리 가능을 확인한 경우만 재생한다.
             open_now = (
-                bool(row["can_log_progress"])
-                and in_calendar
+                in_calendar
             )
-
-        elif start is not None and end is not None:
-            open_now = start <= now <= end
-
         else:
             open_now = False
 
@@ -246,8 +258,8 @@ def build_plan(
     jobs.sort(
         key=lambda job: (
             urgency_order[job.urgency],
-            course_random_rank[(job.urgency, job.course_id)],
             job.deadline or datetime.max,
+            course_random_rank[(job.urgency, job.course_id)],
             -job.remaining_sec,
         )
     )
@@ -265,13 +277,29 @@ def upcoming(store, now: datetime | None = None, days: int = 14) -> list[dict]:
     out = []
     for r in store.query(
         """
-        SELECT a.cmid, a.title, a.open_from, a.open_to, c.name AS course_name
-          FROM activity a JOIN course c ON c.course_id = a.course_id
+        SELECT a.cmid,a.title,a.open_from,a.open_to,a.completion,
+               v.progress_pct,v.watched_sec,v.duration_sec,v.is_progress,
+               c.name AS course_name,
+               EXISTS(
+                   SELECT 1 FROM crawl_log l
+                    WHERE l.kind='playback_once'
+                      AND l.ref=CAST(v.cmid AS TEXT) AND l.ok=1
+               ) AS played_once
+         FROM activity a JOIN course c ON c.course_id = a.course_id
           LEFT JOIN vod v ON v.cmid = a.cmid
-         WHERE a.modname='vod' AND a.open_from IS NOT NULL
-           AND COALESCE(v.progress_pct, 0) < 100
+         WHERE c.enrolled=1 AND a.present=1
+           AND COALESCE(a.restricted,0)=0
+           AND a.modname='vod' AND a.open_from IS NOT NULL
         """
     ):
+        if (
+            r["completion"] == "y"
+            or progress_verified(
+                r["progress_pct"], r["watched_sec"], r["duration_sec"]
+            )
+            or (r["is_progress"] == 0 and bool(r["played_once"]))
+        ):
+            continue
         start = _dt(r["open_from"])
         if start and now < start <= horizon:
             out.append(dict(r))

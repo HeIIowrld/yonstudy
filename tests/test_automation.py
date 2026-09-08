@@ -103,6 +103,61 @@ class ScheduledWatchTests(unittest.TestCase):
             )
             self.assertEqual(log[0]["ok"], 1)
 
+    def test_tracked_video_requires_progress_and_max_position(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course(
+                {
+                    "course_id": 1, "year": "2026", "semester": "2학기",
+                    "name": "컴퓨터비젼", "title": "컴퓨터비젼", "slug": "CV",
+                }
+            )
+            store.save_activity(
+                {
+                    "cmid": 30, "course_id": 1, "modname": "vod",
+                    "title": "부분 시청 강의", "completion": "n", "restricted": 0,
+                }
+            )
+            store.save_vod(
+                {
+                    "cmid": 30, "course_id": 1, "duration_sec": 600,
+                    "watched_sec": 300, "progress_pct": 100,
+                    "is_progress": 1, "status": "ok",
+                }
+            )
+            store.commit()
+            course = SimpleNamespace(
+                course_id=1, year="2026", semester="2학기", title="컴퓨터비젼"
+            )
+            job = SimpleNamespace(
+                cmid=30, course_id=1, course_name="컴퓨터비젼",
+                title="부분 시청 강의", remaining_sec=300, rate=2.0,
+                open_to=None, tracks_progress=True,
+            )
+            fake_client = MagicMock()
+            fake_client.session_info.return_value = (True, "session")
+            fake_archiver = MagicMock()
+            fake_archiver.sync_courses.return_value = [course]
+
+            def complete_playback(selected, cookie_path, on_result=None):
+                on_result(selected[0], True, "ended")
+                return 0
+
+            with (
+                patch("yonstudy.automation.current_term", return_value=("2026", "2학기")),
+                patch("yonstudy.automation.LearnUsClient", return_value=fake_client),
+                patch("yonstudy.automation.Archiver", return_value=fake_archiver),
+                patch("yonstudy.autoplay.build_plan", side_effect=[[job], [job]]),
+                patch("yonstudy.autoplay.run_plan", side_effect=complete_playback),
+            ):
+                code, state = run_scheduled_watch(
+                    store_path=root, cookie_path="unused", limit=1
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(state["status"], "verification_failed")
+            self.assertFalse(state["verification"][0]["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

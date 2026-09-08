@@ -34,7 +34,28 @@ class MonitorTests(unittest.TestCase):
             "cmid": cmid, "course_id": 1, "progress_pct": progress,
             "watched_sec": watched, "duration_sec": duration,
             "is_progress": is_progress,
+            "can_log_progress": 1 if is_progress else 0,
+            "status": "ok",
         })
+
+    def test_failed_metadata_is_visible_but_not_actionable(self):
+        self.add_vod(21, "확인 실패 강의", 1, 0, 0, 600)
+        self.store.save_vod({
+            "cmid": 21, "course_id": 1, "is_progress": 1,
+            "can_log_progress": 0, "status": "error",
+        })
+        self.store.commit()
+        now = datetime(2026, 9, 2, 2, 0, tzinfo=SEOUL)
+
+        self.assertEqual(
+            viewing_queue(self.store, year="2026", semester="2학기", now=now),
+            [],
+        )
+        snapshot = attendance_snapshot(
+            self.store, year="2026", semester="2학기"
+        )
+        self.assertEqual(snapshot[0]["status"], "error")
+        self.assertFalse(snapshot[0]["verified"])
 
     def test_queue_is_sequential_and_requires_both_attendance_signals(self):
         self.add_vod(12, "2주차 1차시", 2, 0, 0, 600)
@@ -75,6 +96,24 @@ class MonitorTests(unittest.TestCase):
         )
         self.assertTrue(snapshot[0]["played_once"])
         self.assertTrue(snapshot[0]["verified"])
+
+    def test_unenrolled_course_is_removed_from_attendance_and_queue(self):
+        self.add_vod(30, "철회 전 강의", 1, 0, 0, 600)
+        self.store.save_course(
+            {"course_id": 1, "enrolled": 0, "unenrolled_at": "2026-09-02T01:00:00"}
+        )
+        self.store.commit()
+        now = datetime(2026, 9, 2, 2, 0, tzinfo=SEOUL)
+
+        self.assertEqual(
+            attendance_snapshot(self.store, year="2026", semester="2학기"), []
+        )
+        self.assertEqual(
+            viewing_queue(
+                self.store, year="2026", semester="2학기", now=now
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

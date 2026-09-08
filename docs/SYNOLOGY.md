@@ -1,0 +1,53 @@
+# Synology container deployment
+
+The production layout keeps mutable data and secrets outside the image:
+
+```text
+~/.yonstudy/
+├── compose.yaml
+├── .env                    host paths used by Docker Compose
+├── config/
+│   ├── yonstudy.env        mode 0600; LearnUs and mail credentials
+│   └── rclone.conf         local archive alias
+├── logs/
+└── store/                  SQLite, blobs, reports, cookies
+```
+
+The human-readable archive is mounted separately at `/archive`. The configured
+`archive:` rclone alias writes there without sending files through SMB back to
+the same NAS.
+
+## Initial deployment
+
+Install Synology Container Manager, copy `compose.yaml` to the deployment
+directory, and create `.env` from `deploy/synology.env.example`. Create the two
+files in `config/` from their examples and restrict the credential file:
+
+```bash
+chmod 600 config/yonstudy.env config/rclone.conf
+sudo docker compose pull
+sudo docker compose up -d
+sudo docker compose ps
+```
+
+Run a read-only application check:
+
+```bash
+sudo docker exec yonstudy /app/deploy/run-job.sh keepalive
+sudo docker exec yonstudy python /app/cli.py status
+```
+
+## Automatic updates
+
+`.github/workflows/container.yml` runs the unit tests and publishes
+`ghcr.io/hellowrld/yonstudy:latest` after every push to `main`. The updater
+checks that tag every five minutes and recreates only labeled containers when
+the digest changes. The SQLite store, cookies, logs, and archive are bind
+mounts, so replacing the application container does not replace user data.
+
+Inspect deployment and scheduler logs with:
+
+```bash
+sudo docker compose logs --tail=100 scheduler updater
+tail -n 100 logs/scheduler.log
+```

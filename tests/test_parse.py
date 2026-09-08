@@ -1,6 +1,54 @@
 import unittest
 
-from yonstudy.parse import ProgressRow, _completion_state
+from yonstudy.parse import (
+    ProgressRow, _completion_state, find_activity_ids, parse_course_list,
+    parse_course_page,
+)
+
+
+class RosterAndActivityMarkupTests(unittest.TestCase):
+    def test_course_list_accepts_extra_classes_single_quotes_and_query_order(self):
+        page = """
+        <table><tbody data-kind='courses' class='table striped my-course-lists'>
+          <tr><TD>2026</TD><TD>2학기</TD><td>
+            <span class='small badge badge-course'>교과</span>
+            <a class='coursefullname' href='https://ys.learnus.org/course/view.php?x=1&amp;id=7'>
+              자료구조 (CSE1000.01-00)
+            </a>
+          </td></tr>
+        </tbody></table>
+        """
+
+        courses = parse_course_list(page)
+
+        self.assertEqual(len(courses), 1)
+        self.assertEqual(courses[0].course_id, 7)
+        self.assertEqual(courses[0].name, "자료구조")
+        self.assertEqual(courses[0].kind, "교과")
+
+    def test_activity_parser_accepts_reordered_attributes_and_excludes_labels(self):
+        page = """
+        <li class='section main' id='section-2'>
+          <h3 class='sectionname extra'>2주차</h3>
+          <li data-x='1' id='module-10' class='url activity modtype_url'>
+            <a href='/mod/url/view.php?x=1&amp;id=10'>
+              <span class='extra instancename'>알고리즘 링크</span>
+            </a>
+          </li>
+          <li id='module-11' class='activity label modtype_label'></li>
+        </li>
+        """
+
+        activities, _ = parse_course_page(page)
+
+        self.assertEqual(find_activity_ids(page), {10})
+        self.assertEqual([row.cmid for row in activities], [10])
+        self.assertEqual(activities[0].title, "알고리즘 링크")
+        self.assertEqual(activities[0].section_name, "2주차")
+        self.assertEqual(
+            activities[0].url,
+            "https://ys.learnus.org/mod/url/view.php?x=1&id=10",
+        )
 
 
 class CompletionStateTests(unittest.TestCase):
