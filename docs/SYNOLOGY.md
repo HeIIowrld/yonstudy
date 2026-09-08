@@ -6,6 +6,7 @@ The production layout keeps mutable data and secrets outside the image:
 ~/.yonstudy/
 ├── compose.yaml
 ├── .env                    host paths used by Docker Compose
+├── source/                 clean Git checkout used for builds
 ├── config/
 │   ├── yonstudy.env        mode 0600; LearnUs and mail credentials
 │   └── rclone.conf         local archive alias
@@ -39,11 +40,14 @@ sudo docker exec yonstudy python /app/cli.py status
 
 ## Automatic updates
 
-`.github/workflows/container.yml` runs the unit tests and publishes
-`ghcr.io/hellowrld/yonstudy:latest` after every push to `main`. The updater
-checks that tag every five minutes and recreates only labeled containers when
-the digest changes. The SQLite store, cookies, logs, and archive are bind
-mounts, so replacing the application container does not replace user data.
+`.github/workflows/container.yml` runs the unit tests and verifies that the
+container image builds after every push to `main`. The NAS updater checks the
+public repository every five minutes and deploys a commit only after its exact
+GitHub `test` check succeeds. It builds in the dedicated clean checkout and
+keeps the previous image as `yonstudy:rollback`. The SQLite store, cookies,
+logs, and archive are bind mounts, so replacing the application container does
+not replace user data. No inbound NAS port, registry credential, or GitHub
+deployment token is required.
 
 Inspect deployment and scheduler logs with:
 

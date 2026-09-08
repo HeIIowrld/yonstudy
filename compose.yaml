@@ -2,7 +2,10 @@ name: yonstudy
 
 services:
   scheduler:
-    image: ghcr.io/hellowrld/yonstudy:latest
+    image: yonstudy:local
+    build:
+      context: ${YONSTUDY_SOURCE_DIR}
+      dockerfile: Dockerfile
     container_name: yonstudy
     restart: unless-stopped
     init: false
@@ -14,8 +17,6 @@ services:
       - ${YONSTUDY_CONFIG_DIR}:/config:ro
       - ${YONSTUDY_ARCHIVE_DIR}:/archive
     shm_size: 1gb
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
     logging:
       driver: json-file
       options:
@@ -23,17 +24,23 @@ services:
         max-file: "3"
 
   updater:
-    image: containrrr/watchtower:1.7.1
+    image: docker:27-cli
     container_name: yonstudy-updater
     restart: unless-stopped
     environment:
       TZ: Asia/Seoul
-      WATCHTOWER_CLEANUP: "true"
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_POLL_INTERVAL: "300"
-      WATCHTOWER_ROLLING_RESTART: "true"
+      YONSTUDY_REPOSITORY: HeIIowrld/yonstudy
+      YONSTUDY_UPDATE_INTERVAL: "300"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - apk add --no-cache curl git jq;
+        git config --global --add safe.directory /source;
+        exec /source/deploy/update-loop.sh
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${YONSTUDY_SOURCE_DIR}:/source
+      - ${YONSTUDY_DATA_DIR}/.env:/deployment/.env:ro
+      - ${YONSTUDY_DATA_DIR}/deploy-state:/state
     logging:
       driver: json-file
       options:
