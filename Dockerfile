@@ -23,6 +23,9 @@ RUN apt-get update \
         "playwright==${PLAYWRIGHT_VERSION}" \
         "pypdf==6.14.2" \
     && python -m playwright install --with-deps chromium \
+    && python -m playwright install chrome \
+    && install -d /root/.cache \
+    && ln -sfn /ms-playwright /root/.cache/ms-playwright \
     && ln -snf /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
     && echo Asia/Seoul >/etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -36,7 +39,8 @@ COPY deploy ./deploy
 RUN chmod 0755 /app/deploy/container-entrypoint.sh /app/deploy/run-job.sh \
         /app/deploy/run_job.py /app/deploy/update-loop.sh \
         /app/deploy/update-once.sh \
-    && install -m 0644 /app/deploy/yonstudy.cron /etc/cron.d/yonstudy
+    && install -m 0644 /app/deploy/yonstudy.cron /etc/cron.d/yonstudy \
+    && /usr/local/bin/python /app/deploy/check_browser.py
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/app/deploy/container-entrypoint.sh"]

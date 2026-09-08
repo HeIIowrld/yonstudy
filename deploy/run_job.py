@@ -51,6 +51,19 @@ def stamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def job_environment(path: Path = CONFIG) -> dict[str, str]:
+    """Build a cron-safe environment while allowing explicit config overrides."""
+    env = os.environ.copy()
+    # Debian cron does not preserve every image ENV entry. Playwright otherwise
+    # falls back to /root/.cache and misses the browser installed in the image.
+    env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright")
+    # LearnUs streams H.264/AAC. Use the branded browser installed in the image
+    # because bundled Chromium may omit proprietary media codecs.
+    env.setdefault("YONSTUDY_BROWSER_CHANNEL", "chrome")
+    env.update(read_environment(path))
+    return env
+
+
 def main() -> int:
     job = sys.argv[1] if len(sys.argv) > 1 else ""
     if job not in JOBS:
@@ -60,8 +73,7 @@ def main() -> int:
         print(f"missing configuration: {CONFIG}", file=sys.stderr)
         return 1
 
-    env = os.environ.copy()
-    env.update(read_environment(CONFIG))
+    env = job_environment()
     args, wait_for_lock = JOBS[job]
     command = ["/usr/bin/flock", "-E", "0"]
     if not wait_for_lock:

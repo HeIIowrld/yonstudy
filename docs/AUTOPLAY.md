@@ -80,9 +80,10 @@ c.ajax = function(state, from, to){
 뷰어 코드에서 직접 확인한 것들:
 
 1. **브라우저의 H.264/AAC 지원을 실행 시 확인해야 한다.**
-   LearnUs HLS는 H.264/AAC다. 현재 설치된 Playwright Chromium은 `canPlayType()`에서
-   지원을 확인했으며, 시스템 Chrome은 이 호스트에서 네트워크를 오프라인으로 잘못
-   판단했다. 기본은 Playwright Chromium이고 필요하면 `YONSTUDY_BROWSER_CHANNEL=chrome`으로 바꾼다.
+   LearnUs HLS는 H.264/AAC다. NAS 컨테이너는 시스템 Chrome을 설치하고
+   `YONSTUDY_BROWSER_CHANNEL=chrome`을 기본값으로 사용한다. 이미지 빌드와 배포 직후
+   `deploy/check_browser.py`가 브라우저 실행 및 코덱 지원을 검사한다. 로컬 환경은 이
+   변수를 비워 두면 Playwright Chromium을 사용할 수 있지만 코덱 지원을 따로 확인해야 한다.
 2. **devtools 탐지 트랩이 있다.**
    ```js
    console.log(Object.defineProperties(new Error, { message: { get(){ F.submit() } } }))

@@ -61,7 +61,8 @@ if ! run_compose up -d --no-deps scheduler; then
 fi
 
 sleep 3
-if ! docker exec yonstudy python /app/cli.py --store /data/store status >/dev/null; then
+if ! docker exec yonstudy python /app/cli.py --store /data/store status >/dev/null \
+    || ! docker exec yonstudy python /app/deploy/check_browser.py >/dev/null; then
     echo "$(date -Iseconds) post-deploy check failed for $candidate" >&2
     if docker image inspect yonstudy:rollback >/dev/null 2>&1; then
         docker rm -f yonstudy >/dev/null 2>&1 || true
