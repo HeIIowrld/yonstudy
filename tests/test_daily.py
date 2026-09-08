@@ -379,8 +379,9 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn("제출 완료", html_body)
         self.assertIn("공개 예정", html_body)
 
+    @patch("yonstudy.daily.Path.exists", return_value=True)
     @patch("yonstudy.daily.subprocess.run")
-    def test_sendmail_transport(self, run):
+    def test_sendmail_transport(self, run, _exists):
         run.return_value = Mock(returncode=0, stderr=b"")
         with patch.dict(os.environ, {"YONSTUDY_SMTP_HOST": ""}):
             send_report(

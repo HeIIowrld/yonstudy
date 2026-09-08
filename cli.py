@@ -19,11 +19,21 @@ from yonstudy.store import Store  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 _LEGACY_COOKIES = Path("/root/ys.learnus.org_cookies.txt")
+
+
+def _path_exists(path: Path) -> bool:
+    """권한이 없는 레거시 경로는 없는 경로처럼 취급한다."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 DEFAULT_COOKIES = os.environ.get(
     "LEARNUS_COOKIES",
     str(
         _LEGACY_COOKIES
-        if _LEGACY_COOKIES.exists()
+        if _path_exists(_LEGACY_COOKIES)
         else PROJECT_ROOT / "store/learnus-cookies.txt"
     ),
 )
