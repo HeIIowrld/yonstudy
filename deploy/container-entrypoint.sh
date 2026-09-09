@@ -15,4 +15,6 @@ if [[ ! -r /config/rclone.conf ]]; then
     exit 1
 fi
 
+/usr/local/bin/python /app/deploy/install_desktop_script.py
+
 exec /usr/sbin/cron -f

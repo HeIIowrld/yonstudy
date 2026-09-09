@@ -11,6 +11,7 @@ services:
     init: false
     environment:
       TZ: Asia/Seoul
+      YONSTUDY_DESKTOP_SCRIPT_DIR: ${YONSTUDY_DESKTOP_SCRIPT_DIR:-}
     volumes:
       - ${YONSTUDY_DATA_DIR}/store:/data/store
       - ${YONSTUDY_DATA_DIR}/logs:/data/logs

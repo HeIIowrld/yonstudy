@@ -35,8 +35,10 @@ WORKDIR /app
 COPY cli.py README.md ./
 COPY yonstudy ./yonstudy
 COPY deploy ./deploy
+COPY desktop ./desktop
 
 RUN chmod 0755 /app/deploy/container-entrypoint.sh /app/deploy/run-job.sh \
+        /app/deploy/install_desktop_script.py \
         /app/deploy/run_job.py /app/deploy/update-loop.sh \
         /app/deploy/update-once.sh \
     && install -m 0644 /app/deploy/yonstudy.cron /etc/cron.d/yonstudy \
