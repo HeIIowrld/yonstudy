@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 from . import parse as P
 from .lti import LtiArchiveError, fetch_lti_assignment
+from .oj import OjArchiveError, enrich_with_yonsei_oj
 from .client import LEARNUS, LearnUsClient
 from .store import Store, _now
 
@@ -460,12 +461,27 @@ class Archiver:
             self.s.log("lti", str(a.cmid), False, str(exc))
             return
 
+        oj_contest = None
+        try:
+            assignment, oj_contest = enrich_with_yonsei_oj(
+                assignment,
+                a.title,
+                self.s.root / "yonsei-oj-cookies.txt",
+            )
+        except OjArchiveError as exc:
+            # Gradescope 명세는 보존하고 OJ 쪽 문제만 다음 동기화에서 다시 시도한다.
+            self.s.log("yonsei_oj", str(a.cmid), False, str(exc))
+
         fields = {
             "Provider": assignment.provider,
             "Question count": str(assignment.question_count),
         }
         if assignment.total_points:
             fields["Maximum marks"] = assignment.total_points
+        if oj_contest:
+            fields["External provider"] = "Yonsei-OJ"
+            fields["External contest"] = oj_contest.title
+            fields["External problem count"] = str(len(oj_contest.problems))
         self.s.save_submission(
             {
                 "cmid": a.cmid,
@@ -485,6 +501,7 @@ class Archiver:
         self.say(
             f"    [lti/{assignment.provider}] {a.title[:34]!r}"
             f" — 명세 {assignment.question_count}문항"
+            + (f" + OJ {len(oj_contest.problems)}문제" if oj_contest else "")
         )
 
     def _sync_board(self, course, a, cdir, max_pages: int, fetch_files: bool) -> None:

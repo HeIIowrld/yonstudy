@@ -109,7 +109,7 @@ python cli.py status      # 지금까지 수집한 데이터 요약
 
 - 강좌와 주차별 활동 메타데이터
 - 강의자료, 게시판 첨부, 본인 제출 파일
-- LearnUs 과제 본문과 Gradescope LTI 문항 명세(HTML/Markdown)
+- LearnUs 과제 본문, Gradescope LTI 문항과 연결된 Yonsei-OJ 문제 명세(HTML/Markdown)
 - 게시판·포럼 글과 본문
 - VOD 주소, 재생 가능 기간, 온라인 출석 진도
 - LearnUs에서 제공하는 자막
@@ -603,6 +603,8 @@ systemctl list-timers 'yonstudy-*'
 | `YONSTUDY_STORE` | SQLite, blob, 상태 파일 저장 위치. 기본 `./store` |
 | `LEARNUS_COOKIES` | 로그인 쿠키 파일. 기본 `store/learnus-cookies.txt` |
 | `LEARNUS_ID`, `LEARNUS_PW` | 백그라운드 자동 재로그인 |
+| `YONSEI_OJ_ID`, `YONSEI_OJ_PW` | Yonsei-OJ 로그인. 생략하면 LearnUs 자동 로그인 값을 재사용 |
+| `YONSTUDY_OJ_AUTO_JOIN` | 새 Yonsei-OJ 콘테스트 자동 참여. 기본 `0`; `1`일 때만 참여 상태 변경 |
 | `YONSTUDY_REMOTE` | `upload`, `automate`, `archive-videos`의 rclone 대상 |
 | `YONSTUDY_EXPORT_DIR` | `export` 기본 출력 경로 |
 | `YONSTUDY_MAX_FILE_MB` | 일반 첨부파일 한 개의 최대 수집 크기. 기본 512MB |
@@ -637,6 +639,7 @@ store/
   monitor_state.json        VOD·출석부 확인 결과
   watch_state.json          예약 재생과 진도 확인 결과
   recording_scan_state.json 핫폴더 파일 크기·mtime 안정화 상태
+  yonsei-oj-cookies.txt      Yonsei-OJ 문제 명세 수집용 로그인 쿠키
   recordings/               모호하거나 미분류된 외부 녹음
 ```
 

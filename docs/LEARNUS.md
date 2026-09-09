@@ -96,7 +96,11 @@ yontil 확장(`src/core/login/login-learnus.ts`)의 플로우를 이식했다.
 | `resource` | 26 | 표준 자료 | pluginfile |
 | `forum` | 11 | 포럼 | 토론 목록 → 글 |
 | `vpl` | 8 | 코딩 과제 | 2단계 조회 (아래) |
-| `lti` / `choice` | 2 / 2 | 외부도구 / 선택설문 | Gradescope LTI 과제는 OIDC 실행 후 공개 문항 명세 수집 / choice는 제출 상태 |
+| `lti` / `choice` | 2 / 2 | 외부도구 / 선택설문 | Gradescope LTI 문항과 연결된 Yonsei-OJ 문제 명세 수집 / choice는 제출 상태 |
+
+Yonsei-OJ 콘테스트 참여는 계정 상태를 바꾸므로 기본값에서는 자동 실행하지 않는다.
+이미 참여한 콘테스트는 로그인 쿠키나 OJ 자격 증명으로 읽는다. 새 콘테스트에도 자동
+참여하려면 `YONSTUDY_OJ_AUTO_JOIN=1`을 명시한다.
 
 `label`(82)은 설명 텍스트라 활동에서 제외한다.
 

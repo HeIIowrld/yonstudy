@@ -110,6 +110,12 @@ def render_assignment_markdown(course: dict, assignment: dict) -> bytes:
         metadata.append(f"- 제공자: {fields['Provider']}")
     if fields.get("Maximum marks"):
         metadata.append(f"- 총점: {fields['Maximum marks']}점")
+    if fields.get("External provider"):
+        metadata.append(f"- 외부 제공자: {fields['External provider']}")
+    if fields.get("External contest"):
+        metadata.append(f"- 외부 콘테스트: {fields['External contest']}")
+    if fields.get("External problem count"):
+        metadata.append(f"- 외부 문제 수: {fields['External problem count']}개")
     metadata.extend([
         f"- 상태: {assignment.get('status') or '알 수 없음'}",
         f"- 시작: {start}",
@@ -139,6 +145,15 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
         f"<li>총점: {esc(fields['Maximum marks'])}점</li>"
         if fields.get("Maximum marks") else ""
     )
+    external = "".join(
+        f"<li>{label}: {esc(fields[key])}{suffix}</li>"
+        for key, label, suffix in (
+            ("External provider", "외부 제공자", ""),
+            ("External contest", "외부 콘테스트", ""),
+            ("External problem count", "외부 문제 수", "개"),
+        )
+        if fields.get(key)
+    )
     body = f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8">
 <title>{esc(assignment.get('title') or '과제 명세')}</title></head><body>
@@ -149,6 +164,7 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
 <li>유형: {esc(assignment.get('modname'))}</li>
 {provider}
 {maximum}
+{external}
 <li>상태: {esc(assignment.get('status'))}</li>
 <li>시작: {esc(start)}</li>
 <li>마감: {esc(due)}</li>
