@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -271,14 +272,16 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(report.completion_by_course[0]["effective_incomplete"], 1)
         self.assertIn("확인 필요", render_email_text(report))
 
-    def test_email_lists_full_term_videos_but_excludes_future_from_rate(self):
+    def test_daily_email_is_compact_and_sunday_lists_full_term_videos(self):
         day = self.today.isoformat()
         tomorrow = (self.today + timedelta(days=1)).isoformat()
+        after_horizon = (self.today + timedelta(days=15)).isoformat()
         videos = [
             (10, "완료한 강의", "y", day, 100, 600),
             (11, "듣는 중인 강의", "n", day, 50, 300),
             (12, "아직 안 본 강의", "n", day, 0, 0),
             (13, "내일 공개 강의", "n", tomorrow, 0, 0),
+            (14, "15일 후 공개 강의", "n", after_horizon, 0, 0),
         ]
         for cmid, title, completion, opens, progress, watched in videos:
             row = self.activity(completion)
@@ -306,33 +309,52 @@ class DailyReportTests(unittest.TestCase):
         self.store.commit()
 
         report = build_daily_report(self.store, target=self.today)
-        self.assertEqual(len(report.attendance), 4)
+        self.assertEqual(len(report.attendance), 5)
         self.assertNotIn(13, {row["cmid"] for row in report.todos})
         self.assertEqual(report.completion_by_course[0]["effective_incomplete"], 2)
-        self.assertEqual(report.completion_by_course[0]["upcoming"], 1)
+        self.assertEqual(report.completion_by_course[0]["upcoming"], 2)
 
         text_body = render_email_text(report)
         self.assertIn("과목별 동영상 수강률", text_body)
         self.assertIn("테스트과목: 공개분 1/3개 수강 완료 · 수강률 33%", text_body)
-        self.assertIn("학기 전체 확인 4개 · 공개 예정 1개", text_body)
-        self.assertIn("이번 학기 강의 목록 (4개)", text_body)
-        self.assertIn("공개 예정 · 테스트과목 · 1주차 · 내일 공개 강의", text_body)
+        self.assertIn("학기 전체 확인 5개 · 공개 예정 2개", text_body)
+        self.assertNotIn("이번 학기 강의 목록", text_body)
+        self.assertIn("14일 이내 공개 예정 (1개)", text_body)
+        self.assertIn("영상 ·", text_body)
+        self.assertIn("내일 공개 강의", text_body)
+        self.assertNotIn("15일 후 공개 강의", text_body)
+        self.assertNotIn("완료한 강의", text_body)
         self.assertNotIn("마지막 재생", text_body)
 
         html_body = render_report_html(report)
         self.assertIn("과목별 동영상 수강률", html_body)
         self.assertIn("1/3개", html_body)
         self.assertIn("width:33%", html_body)
-        self.assertIn("학기 전체 4개 · 공개 예정 1개", html_body)
-        self.assertIn("이번 학기 강의 목록 (4개)", html_body)
+        self.assertIn("학기 전체 5개 · 공개 예정 2개", html_body)
+        self.assertNotIn("이번 학기 강의 목록", html_body)
+        self.assertIn("14일 이내 공개 예정 (1개)", html_body)
         self.assertIn("내일 공개 강의", html_body)
+        upcoming_section = html_body.split("14일 이내 공개 예정 (1개)", 1)[1]
+        upcoming_section = upcoming_section.split("현재 남은 항목", 1)[0]
+        self.assertNotIn("15일 후 공개 강의", upcoming_section)
+        self.assertNotIn("완료한 강의", html_body)
         self.assertNotIn("동영상 수강 현황", html_body)
+
+        sunday = report.target + timedelta(days=(6 - report.target.weekday()) % 7)
+        weekly_report = replace(report, target=sunday)
+        weekly_text = render_email_text(weekly_report)
+        weekly_html = render_report_html(weekly_report)
+        self.assertIn("이번 학기 강의 목록 (5개)", weekly_text)
+        self.assertIn("완료한 강의", weekly_text)
+        self.assertIn("15일 후 공개 강의", weekly_text)
+        self.assertIn("이번 학기 강의 목록 (5개)", weekly_html)
+        self.assertIn("일요일 주간 상세판", weekly_html)
 
         full_body = render_report(report)
         self.assertIn("[공개 예정] [테스트과목]", full_body)
         self.assertNotIn("내일 공개 강의 · 미완료", full_body)
 
-    def test_report_lists_all_term_assignment_submission_states(self):
+    def test_daily_email_is_compact_and_sunday_lists_all_assignments(self):
         day = self.today.isoformat()
         tomorrow = (self.today + timedelta(days=1)).isoformat()
         assignments = [
@@ -370,16 +392,27 @@ class DailyReportTests(unittest.TestCase):
         self.assertNotIn(32, {row["cmid"] for row in report.todos})
 
         text_body = render_email_text(report)
-        self.assertIn("이번 학기 과제·제출 목록 (3개)", text_body)
-        self.assertIn("제출 완료 · 테스트과목 · 제출한 과제", text_body)
-        self.assertIn("미제출 · 테스트과목 · 남은 과제", text_body)
-        self.assertIn("공개 예정 · 테스트과목 · 다음 과제", text_body)
+        self.assertNotIn("이번 학기 과제·제출 목록", text_body)
+        self.assertNotIn("제출한 과제", text_body)
+        self.assertIn("과제 · 테스트과목 · 남은 과제", text_body)
+        self.assertIn("14일 이내 공개 예정 (1개)", text_body)
+        self.assertIn("다음 과제", text_body)
         self.assertIn("현재 남은 항목", text_body)
 
         html_body = render_report_html(report)
-        self.assertIn("이번 학기 과제·제출 목록 (3개)", html_body)
-        self.assertIn("제출 완료", html_body)
-        self.assertIn("공개 예정", html_body)
+        self.assertNotIn("이번 학기 과제·제출 목록", html_body)
+        self.assertNotIn("제출한 과제", html_body)
+        self.assertIn("14일 이내 공개 예정 (1개)", html_body)
+        self.assertIn("다음 과제", html_body)
+
+        sunday = report.target + timedelta(days=(6 - report.target.weekday()) % 7)
+        weekly_report = replace(report, target=sunday)
+        weekly_text = render_email_text(weekly_report)
+        weekly_html = render_report_html(weekly_report)
+        self.assertIn("이번 학기 과제·제출 목록 (3개)", weekly_text)
+        self.assertIn("제출한 과제", weekly_text)
+        self.assertIn("이번 학기 과제·제출 목록 (3개)", weekly_html)
+        self.assertIn("일요일 주간 상세판", weekly_html)
 
     @patch("yonstudy.daily.Path.exists", return_value=True)
     @patch("yonstudy.daily.subprocess.run")
