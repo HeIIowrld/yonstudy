@@ -422,7 +422,7 @@ def cmd_upload(args) -> int:
                 SELECT f.role,COUNT(*) AS count
                  FROM file f JOIN course c ON c.course_id=f.course_id
                  WHERE c.year=? AND c.semester=? AND c.enrolled=1
-                   AND f.role IN ('resource','post','submission','introattachment')
+                   AND f.role IN ('resource','post','submission','introattachment','subtitle')
                  GROUP BY f.role
                 """,
                 (year, semester),
@@ -441,6 +441,23 @@ def cmd_upload(args) -> int:
             """,
             (year, semester),
         )[0]["count"]
+        course_count = store.query(
+            """
+            SELECT COUNT(*) AS count FROM course
+             WHERE year=? AND semester=? AND enrolled=1
+            """,
+            (year, semester),
+        )[0]["count"]
+        assignment_count = store.query(
+            """
+            SELECT COUNT(*) AS count
+              FROM submission s
+              JOIN course c ON c.course_id=s.course_id
+              JOIN activity a ON a.cmid=s.cmid
+             WHERE c.year=? AND c.semester=? AND c.enrolled=1 AND a.present=1
+            """,
+            (year, semester),
+        )[0]["count"]
         print(json.dumps({
             "mode": "dry-run",
             "remote": args.remote,
@@ -448,6 +465,8 @@ def cmd_upload(args) -> int:
             "semester": semester,
             "files": counts,
             "posts": post_count,
+            "course_indexes": course_count,
+            "assignment_specs": assignment_count,
         }, ensure_ascii=False, indent=2))
         return 0
 
@@ -687,11 +706,11 @@ def cmd_monitor(args) -> int:
 
 
 def cmd_archive_only(args) -> int:
-    """진도 비추적 VOD를 재생 없이 remote에 보관한다."""
+    """현재 학기의 접근 가능한 모든 VOD를 재생 없이 remote에 보관한다."""
     from dataclasses import asdict
     from yonstudy.daily import SEOUL, current_term
     from yonstudy.remote import RcloneRemote
-    from yonstudy.video_archive import archive_untracked_vods
+    from yonstudy.video_archive import archive_course_vods
 
     now = datetime.now(SEOUL)
     year, semester = current_term(now.date())
@@ -714,7 +733,7 @@ def cmd_archive_only(args) -> int:
         store.commit()
 
     sink = RcloneRemote(args.remote)
-    result = archive_untracked_vods(
+    result = archive_course_vods(
         store, sink, year=year, semester=semester,
         course_ids=course_ids, limit=args.limit,
         client=client, dry_run=args.dry_run,
@@ -848,7 +867,8 @@ def main() -> int:
     monitor.set_defaults(fn=cmd_monitor)
 
     archive_only = sub.add_parser(
-        "archive-only", help="진도 비추적 VOD를 재생 없이 remote에 원본 보관",
+        "archive-videos", aliases=["archive-only"],
+        help="현재 학기의 접근 가능한 모든 VOD를 재생 없이 remote에 원본 보관",
     )
     archive_only.add_argument("--course", nargs="*", type=int)
     archive_only.add_argument("--limit", type=int)

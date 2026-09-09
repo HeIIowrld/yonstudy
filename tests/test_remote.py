@@ -99,11 +99,75 @@ class RcloneRemoteTests(unittest.TestCase):
                 store, remote, year="2026", semester="2학기"
             )
 
-            self.assertEqual(result.uploaded_files, 1)
+            self.assertEqual(result.uploaded_files, 2)
             self.assertEqual(remote.uploaded_from, store.blob_path(digest))
             self.assertEqual(
                 remote.files["2026-2/TST_테스트/lecture.pdf"], b"lecture"
             )
+            self.assertIn("2026-2/TST_테스트/강좌정보.md", remote.files)
+
+    def test_assignment_body_and_metadata_are_archived_without_attachment(self):
+        class MemoryRemote:
+            remote = "nas:backup"
+
+            def __init__(self):
+                self.files = {}
+
+            def exists(self, relative, size=None):
+                body = self.files.get(relative)
+                return body is not None and (size is None or len(body) == size)
+
+            def move(self, *_args, **_kwargs):
+                return False
+
+            def upload_file(self, relative, source, force=False):
+                self.files[relative] = Path(source).read_bytes()
+                return True
+
+            def upload_bytes(self, relative, body, force=False):
+                self.files[relative] = body
+                return True
+
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course({
+                "course_id": 1, "year": "2026", "semester": "2학기",
+                "name": "인공지능개론", "title": "인공지능개론 (AIC2120)",
+                "slug": "AIC2120_인공지능개론",
+            })
+            store.save_activity({
+                "cmid": 10, "course_id": 1, "modname": "turnitintooltwo",
+                "title": "Assignment #1", "section_idx": 2,
+                "section_name": "2주차", "url": "https://example.test/a/10",
+            })
+            store.save_submission({
+                "cmid": 10, "course_id": 1, "modname": "turnitintooltwo",
+                "title": "Assignment #1", "status": "미제출",
+                "due_at": "2026-09-15 23:59",
+                "fields_json": '{"Start date":"2026-09-08 14:08"}',
+                "instructions": "## Goal\n\n직접 AI를 실험한다.",
+                "instructions_html": "<h2>Goal</h2><p>직접 AI를 실험한다.</p>",
+                "submitted": 0,
+            })
+            store.commit()
+
+            remote = MemoryRemote()
+            result = sync_remote_tree(
+                store, remote, year="2026", semester="2학기"
+            )
+
+            self.assertEqual(result.assignment_specs, 1)
+            markdown = next(
+                body for path, body in remote.files.items()
+                if path.endswith(".md") and "과제명세" in path
+            ).decode("utf-8")
+            html = next(
+                body for path, body in remote.files.items()
+                if path.endswith(".html") and "과제명세" in path
+            ).decode("utf-8")
+            self.assertIn("직접 AI를 실험한다.", markdown)
+            self.assertIn("2026-09-15 23:59", markdown)
+            self.assertIn("<h2>Goal</h2>", html)
 
     def test_withdrawn_course_is_skipped_but_classmate_attachment_is_kept(self):
         class MemoryRemote:

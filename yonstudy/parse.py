@@ -6,6 +6,7 @@ import html as html_mod
 import json
 import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from urllib.parse import unquote, urljoin
 
 LEARNUS = "https://ys.learnus.org"
@@ -348,6 +349,7 @@ def _period_and_duration(blob: str) -> dict:
 def parse_course_page(page: str) -> tuple[list[Activity], dict]:
     """강좌 페이지에서 활동 목록과 강좌 메타를 뽑는다."""
     activities: list[Activity] = []
+    seen_cmids: set[int] = set()
 
     # 섹션(주차) 경계 위치를 미리 구해 활동을 배정한다.
     sections: list[tuple[int, int, str]] = []  # (start, idx, name)
@@ -396,10 +398,14 @@ def parse_course_page(page: str) -> tuple[list[Activity], dict]:
         )
         modname = module_class[len("modtype_"):].lower()
         cmid = int(m.group(3))
-        if not modname:
+        # 일부 모듈(Turnitin 실측)은 같은 ``module-N`` 마크업을 페이지에 두 번
+        # 렌더링한다. PK는 하나여도 후속 상세 요청과 course.json에는 중복이 남으므로
+        # 강좌 페이지를 해석하는 단계에서 한 번만 보존한다.
+        if not modname or cmid in seen_cmids:
             continue
         if modname == "label":
             continue
+        seen_cmids.add(cmid)
         idx, sname = section_of(m.start())
         activities.append(
             Activity(
@@ -631,6 +637,8 @@ class AssignDetail:
     fields: dict = field(default_factory=dict)
     submitted_files: list[tuple[str, str]] = field(default_factory=list)  # (파일명, URL)
     intro_files: list[tuple[str, str]] = field(default_factory=list)
+    instructions: str = ""
+    instructions_html: str = ""
 
     # 제출 여부를 나타내는 표현은 모듈/언어마다 다르다.
     _SUBMITTED = ("submitted", "제출 완료", "제출완료", "보고서 제출", "채점", "graded",
@@ -661,6 +669,191 @@ class AssignDetail:
 _PLUGINFILE = re.compile(r'href="(https://ys\.learnus\.org/pluginfile\.php/[^"]+)"[^>]*>(.*?)</a>', re.S)
 
 
+_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+}
+
+
+class _InnerHtmlExtractor(HTMLParser):
+    """조건에 맞는 요소의 내부 HTML을 중첩 깊이를 지켜 추출한다."""
+
+    def __init__(self, matcher):
+        super().__init__(convert_charrefs=False)
+        self.matcher = matcher
+        self.depth = 0
+        self.current: list[str] = []
+        self.fragments: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if self.depth:
+            self.current.append(self.get_starttag_text())
+            if tag not in _VOID_TAGS:
+                self.depth += 1
+        elif self.matcher(tag, dict(attrs)):
+            self.depth = 1
+
+    def handle_startendtag(self, _tag, _attrs):
+        if self.depth:
+            self.current.append(self.get_starttag_text())
+
+    def handle_endtag(self, tag):
+        if not self.depth:
+            return
+        self.depth -= 1
+        if self.depth:
+            self.current.append(f"</{tag}>")
+        else:
+            fragment = "".join(self.current).strip()
+            if fragment:
+                self.fragments.append(fragment)
+            self.current = []
+
+    def handle_data(self, data):
+        if self.depth:
+            self.current.append(data)
+
+    def handle_entityref(self, name):
+        if self.depth:
+            self.current.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if self.depth:
+            self.current.append(f"&#{name};")
+
+
+class _MarkdownExtractor(HTMLParser):
+    """과제 본문 HTML을 의존성 없이 읽기 좋은 Markdown으로 바꾼다."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.links: list[str | None] = []
+        self.ignored = 0
+
+    def _newline(self, count: int = 1) -> None:
+        self.parts.append("\n" * count)
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        values = dict(attrs)
+        if tag in {"script", "style", "noscript"}:
+            self.ignored += 1
+            return
+        if self.ignored:
+            return
+        if re.fullmatch(r"h[1-6]", tag):
+            self._newline(2)
+            self.parts.append("#" * int(tag[1]) + " ")
+        elif tag == "li":
+            self._newline()
+            self.parts.append("- ")
+        elif tag in {"p", "div", "section", "article", "tr"}:
+            self._newline()
+        elif tag == "br":
+            self._newline()
+        elif tag == "hr":
+            self._newline(2)
+            self.parts.append("---")
+            self._newline(2)
+        elif tag in {"strong", "b"}:
+            self.parts.append("**")
+        elif tag in {"em", "i"}:
+            self.parts.append("*")
+        elif tag == "a":
+            self.links.append(values.get("href"))
+        elif tag == "img":
+            alt = values.get("alt") or values.get("title") or "이미지"
+            src = values.get("src") or values.get("data-src") or ""
+            self.parts.append(f"![{alt}]({src})" if src else f"[{alt}]")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in {"script", "style", "noscript"}:
+            self.ignored = max(0, self.ignored - 1)
+            return
+        if self.ignored:
+            return
+        if re.fullmatch(r"h[1-6]", tag) or tag in {
+            "p", "div", "section", "article", "li", "tr",
+        }:
+            self._newline()
+        elif tag in {"strong", "b"}:
+            self.parts.append("**")
+        elif tag in {"em", "i"}:
+            self.parts.append("*")
+        elif tag == "a":
+            href = self.links.pop() if self.links else None
+            if href:
+                self.parts.append(f" ({html_mod.unescape(href)})")
+
+    def handle_data(self, data):
+        if not self.ignored:
+            self.parts.append(data)
+
+    def markdown(self) -> str:
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in "".join(self.parts).splitlines()]
+        out: list[str] = []
+        for line in lines:
+            if not line and (not out or not out[-1]):
+                continue
+            out.append(line)
+        return "\n".join(out).strip()
+
+
+def _extract_inner_html(source: str, matcher) -> list[str]:
+    parser = _InnerHtmlExtractor(matcher)
+    parser.feed(source)
+    parser.close()
+    return parser.fragments
+
+
+def _assignment_instructions(page: str, modname: str) -> tuple[str, str]:
+    """모듈별 과제 설명 영역만 HTML/Markdown 두 형태로 반환한다."""
+    fragments: list[str] = []
+    if modname == "turnitintooltwo":
+        for attrs, table in re.findall(r"<table\b([^>]*)>(.*?)</table>", page, re.S | re.I):
+            class_attr = re.search(r"\bclass\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I)
+            if not class_attr or "partDetails" not in class_attr.group(2).split():
+                continue
+            fragments.extend(_extract_inner_html(
+                table,
+                lambda tag, values: tag == "div"
+                and "no-overflow" in (values.get("class") or "").split(),
+            ))
+    else:
+        description_classes = {
+            "activity-description", "assignintro", "submission-instructions",
+            "feedback_description",
+        }
+        fragments = _extract_inner_html(
+            page,
+            lambda tag, values: tag in {"div", "section"} and (
+                values.get("id") == "intro"
+                or bool(description_classes & set((values.get("class") or "").split()))
+            ),
+        )
+
+    # 동일 설명이 반응형/숨김 UI에 중복 렌더링되는 경우 한 번만 남긴다.
+    unique: list[str] = []
+    seen: set[str] = set()
+    for fragment in fragments:
+        key = text(fragment)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(fragment)
+    raw = "\n<hr>\n".join(unique)
+    markdown_parts: list[str] = []
+    for fragment in unique:
+        parser = _MarkdownExtractor()
+        parser.feed(fragment)
+        parser.close()
+        if rendered := parser.markdown():
+            markdown_parts.append(rendered)
+    return "\n\n---\n\n".join(markdown_parts), raw
+
+
 def parse_submission(page: str, cmid: int, modname: str = "assign") -> AssignDetail:
     """제출형 활동 상세.
 
@@ -668,6 +861,7 @@ def parse_submission(page: str, cmid: int, modname: str = "assign") -> AssignDet
     모듈별 상태를 추가로 확인한다.
     """
     d = AssignDetail(cmid=cmid, modname=modname)
+    d.instructions, d.instructions_html = _assignment_instructions(page, modname)
 
     # 라벨/값 2열 테이블은 모듈을 가리지 않고 대부분 존재한다.
     for tbl in re.findall(r"<table[^>]*>.*?</table>", page, re.S):
@@ -685,6 +879,21 @@ def parse_submission(page: str, cmid: int, modname: str = "assign") -> AssignDet
             d.intro_files.append((name, url))
         else:
             d.intro_files.append((name, url))
+
+    # 본문 삽입 이미지는 링크가 아니라 img src로만 나타날 수 있다. 과제 설명을
+    # 오프라인에서도 복구할 수 있도록 일반 첨부와 같은 과제자료로 수집한다.
+    known_urls = {url for _, url in d.submitted_files + d.intro_files}
+    for attrs in re.findall(r"<img\b([^>]*)>", d.instructions_html, re.S | re.I):
+        src = re.search(r"\b(?:src|data-src)\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I)
+        if not src:
+            continue
+        url = urljoin(LEARNUS, html_mod.unescape(src.group(2)))
+        if "/pluginfile.php/" not in url or url in known_urls:
+            continue
+        alt = re.search(r"\b(?:alt|title)\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I)
+        name = text(alt.group(2)) if alt else unquote(url.rsplit("/", 1)[-1].split("?")[0])
+        d.intro_files.append((name or f"과제이미지_{len(d.intro_files) + 1}", url))
+        known_urls.add(url)
 
     if modname == "turnitintooltwo":
         _parse_turnitin(page, d)
@@ -711,6 +920,30 @@ _TII_GRADE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+)")
 
 def _parse_turnitin(page: str, d: AssignDetail) -> None:
     """숨김 열이 있는 Turnitin 표를 값의 형식으로 읽는다."""
+    canonical = {
+        "시작일": "Start date", "start date": "Start date",
+        "마감일": "Due date", "due date": "Due date",
+        "게시일": "Post date", "post date": "Post date",
+        "가능한 최고점수": "Maximum marks", "maximum marks": "Maximum marks",
+        "max marks": "Maximum marks",
+    }
+    for attrs, table in re.findall(r"<table\b([^>]*)>(.*?)</table>", page, re.S | re.I):
+        class_attr = re.search(r"\bclass\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I)
+        if not class_attr or "partDetails" not in class_attr.group(2).split():
+            continue
+        header_row = re.search(r"<thead[^>]*>.*?<tr[^>]*>(.*?)</tr>", table, re.S | re.I)
+        headers = _cells(header_row.group(1)) if header_row else []
+        for row in re.findall(r"<tbody[^>]*>(.*?)</tbody>", table, re.S | re.I):
+            for record in re.findall(r"<tr[^>]*>(.*?)</tr>", row, re.S | re.I):
+                values = _cells(record)
+                if len(values) != len(headers):
+                    continue
+                for header, value in zip(headers, values):
+                    key = canonical.get(header.strip().lower())
+                    if key and value:
+                        d.fields.setdefault(key, value)
+                break
+
     for tbl in re.findall(r"<table[^>]*>.*?</table>", page, re.S):
         for row in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.S):
             flat = " ".join(_cells(row))
@@ -726,10 +959,6 @@ def _parse_turnitin(page: str, d: AssignDetail) -> None:
             d.fields["Submission status"] = state.group(1) if state else "제출 완료"
             return
 
-    # 제출 테이블이 없으면 마감/시작일만이라도 남긴다.
-    due = re.search(r"마감일.*?(\d{4}-\s*\d{1,2}월-\d{1,2}\s+\d{2}:\d{2})", text(page))
-    if due:
-        d.fields.setdefault("Due date", due.group(1))
     d.fields.setdefault("Submission status", "미제출")
 
 

@@ -425,6 +425,8 @@ class Archiver:
                 "grade": first("Grade", "성적", "Marks", "점수"),
                 "fields_json": json.dumps(f, ensure_ascii=False),
                 "submitted": int(d.submitted), "seen_at": _now(),
+                "instructions": d.instructions or None,
+                "instructions_html": d.instructions_html or None,
             }
         )
         mark = "제출함" if d.submitted else "미제출"

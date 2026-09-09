@@ -112,8 +112,8 @@ python cli.py status      # 지금까지 수집한 데이터 요약
 - VOD 주소, 재생 가능 기간, 온라인 출석 진도
 - LearnUs에서 제공하는 자막
 
-영상 MP4 본체는 `archive`가 받지 않는다. MP4가 필요하면 `download --video` 또는
-`archive-only`를 사용한다.
+영상 MP4 본체는 단독 `archive`가 받지 않는다. 현재 학기 전체 원본 보관은
+`automate`가 매일 수행하며, 수동 실행은 `archive-videos`를 사용한다.
 
 ```bash
 # 모든 강좌
@@ -243,20 +243,26 @@ python cli.py upload \
   --year 2026 --semester 2학기
 ```
 
-업로드는 학기와 과목 폴더를 만들고 자료, 첨부파일, 게시글 Markdown을 저장한다. 같은
-경로에 같은 크기의 파일이 있으면 건너뛰며 원격 파일은 자동으로 삭제하지 않는다.
+업로드는 학기와 과목 폴더를 만들고 강좌 활동 색인, 자료, 자막, 첨부파일, 과제
+명세(HTML/Markdown), 게시글 Markdown을 저장한다. 같은 경로에 같은 크기의 파일이 있으면
+건너뛰며 원격 파일은 자동으로 삭제하지 않는다.
 `missing_sources`가 있으면 `archive`를 다시 실행해 로컬 원본을 채운 뒤 업로드한다.
 게시판 글과 첨부는 작성자가 본인인지와 관계없이 강좌 기록으로 NAS에 보관한다. 철회된
 강좌는 이후 업로드 대상에서 제외하지만 이미 저장한 원격 파일은 삭제하지 않는다.
 
 ```text
 2026-2/AIC2120_인공지능개론및응용/
+  강좌정보.md
   W01-L01__강의자료__Lecture01__f1408.pdf
   W01-L02__강의영상__Week 1-2__cmid4529930.mp4
   게시판_첨부/
   QNA_공지/
   과제자료/
+    Assignment #1/
+      W02-L00__과제명세__Assignment #1__cmid4550129.md
+      W02-L00__과제명세__Assignment #1__cmid4550129.html
   제출물/
+  자막/
 ```
 
 학기 폴더는 `1학기=1`, `2학기=2`, `여름계절수업=S`, `겨울계절수업=W` 형식을 쓴다.
@@ -273,7 +279,7 @@ yonstudy 자체를 Synology Container Manager에서 실행하고 GitHub의 새 �
 1. 로그인 세션 확인
 2. 강좌, 활동, VOD 진도, 자료와 게시글 동기화
 3. 새 파일과 게시글을 rclone remote에 업로드
-4. 진도를 추적하지 않는 VOD를 최대 4편까지 remote에 보관
+4. 현재 학기에서 접근 가능한 모든 VOD 원본을 remote에 증분 보관
 5. 텍스트 리포트 생성
 6. 메일 설정이 있으면 리포트 발송
 
@@ -287,15 +293,17 @@ python cli.py automate
 | 옵션 | 동작 |
 |---|---|
 | `--no-sync` | LearnUs 갱신 없이 현재 DB 내용으로 업로드와 리포트 실행 |
-| `--no-upload` | 자료 업로드와 비추적 VOD 보관을 끄고 리포트만 생성 |
+| `--no-upload` | 자료·과제 명세·자막·VOD 원본 보관을 끄고 리포트만 생성 |
 | `--no-mail` | 메일 발송을 끄고 `store/reports/`에 리포트만 저장 |
 | `--dry-run` | 로그인, 다운로드, 업로드, 파일 기록 없이 실행 계획 출력 |
 | `--remote <remote>:<path>` | 이번 실행의 저장 대상만 변경 |
 
-한 번에 보관할 비추적 VOD 수는 환경변수로 정한다.
+한 번에 보관할 VOD 수는 환경변수로 정한다. 기본값 `0`은 현재 학기의 접근 가능한
+영상을 제한 없이 모두 처리한다. 큰 학기에서 실행 시간을 나누려면 양수로 제한한다.
 
 ```bash
-export YONSTUDY_ARCHIVE_ONLY_LIMIT=2   # 기본값 4
+export YONSTUDY_VIDEO_ARCHIVE_LIMIT=0  # 기본값: 현재 학기 전체
+export YONSTUDY_VIDEO_ARCHIVE_LIMIT=4  # 선택: 실행당 4편
 ```
 
 자동화 결과는 `store/automation_state.json`, 생성한 리포트는 `store/reports/`에서 볼 수
@@ -334,15 +342,16 @@ python cli.py scheduled-watch --dry-run
 python cli.py scheduled-watch --limit 1
 ```
 
-### 진도 비추적 영상 원본 보관
+### 현재 학기 영상 원본 보관
 
-`archive-only`는 LearnUs가 진도를 추적하지 않는 VOD를 임시 MP4로 내려받아 remote에
-올리고 임시 파일을 정리한다.
+`archive-videos`는 현재 학기의 접근 가능한 VOD를 진도 추적 여부와 관계없이 임시
+MP4로 내려받아 remote에 올리고 임시 파일을 정리한다. HLS 원본 다운로드만 수행하며
+LearnUs 진도 기록 API는 호출하지 않는다. 기존 명령 이름 `archive-only`도 호환된다.
 
 ```bash
-python cli.py archive-only --dry-run
-python cli.py archive-only --limit 2
-python cli.py archive-only --course 285311 --remote 'nas:home/archive/yonstudy'
+python cli.py archive-videos --dry-run
+python cli.py archive-videos --limit 2
+python cli.py archive-videos --course 285311 --remote 'nas:home/archive/yonstudy'
 ```
 
 ### 오디오, 프레임과 MP4 만들기
@@ -518,10 +527,10 @@ systemctl list-timers 'yonstudy-*'
 | `YONSTUDY_STORE` | SQLite, blob, 상태 파일 저장 위치. 기본 `./store` |
 | `LEARNUS_COOKIES` | 로그인 쿠키 파일. 기본 `store/learnus-cookies.txt` |
 | `LEARNUS_ID`, `LEARNUS_PW` | 백그라운드 자동 재로그인 |
-| `YONSTUDY_REMOTE` | `upload`, `automate`, `archive-only`의 rclone 대상 |
+| `YONSTUDY_REMOTE` | `upload`, `automate`, `archive-videos`의 rclone 대상 |
 | `YONSTUDY_EXPORT_DIR` | `export` 기본 출력 경로 |
 | `YONSTUDY_MAX_FILE_MB` | 일반 첨부파일 한 개의 최대 수집 크기. 기본 512MB |
-| `YONSTUDY_ARCHIVE_ONLY_LIMIT` | 자동화에서 보관할 비추적 VOD 수. 기본 4 |
+| `YONSTUDY_VIDEO_ARCHIVE_LIMIT` | 자동화 한 번에 보관할 VOD 수. `0`(기본)은 현재 학기 전체 |
 | `YONSTUDY_BROWSER_CHANNEL` | Playwright 브라우저 채널. 예: `chrome` |
 | `YONSTUDY_REPORT_TO` | 자동 리포트 수신 주소 |
 | `YONSTUDY_MAIL_FROM` | 발신 주소 |

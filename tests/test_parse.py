@@ -2,7 +2,7 @@ import unittest
 
 from yonstudy.parse import (
     ProgressRow, _completion_state, find_activity_ids, parse_course_list,
-    parse_course_page,
+    parse_course_page, parse_submission,
 )
 
 
@@ -49,6 +49,60 @@ class RosterAndActivityMarkupTests(unittest.TestCase):
             activities[0].url,
             "https://ys.learnus.org/mod/url/view.php?x=1&id=10",
         )
+
+    def test_duplicate_module_markup_is_archived_once(self):
+        module = """
+        <li id="module-10" class="activity modtype_turnitintooltwo">
+          <a href="/mod/turnitintooltwo/view.php?id=10">
+            <span class="instancename">Assignment #1</span>
+          </a>
+        </li>
+        """
+
+        activities, _ = parse_course_page(module + module)
+
+        self.assertEqual([row.cmid for row in activities], [10])
+
+
+class SubmissionParsingTests(unittest.TestCase):
+    def test_turnitin_dates_and_inline_instructions_are_preserved(self):
+        page = """
+        <table class="partDetails"><thead><tr>
+          <th>제목</th><th>시작일</th><th>마감일</th><th>게시일</th>
+          <th>가능한 최고점수</th>
+        </tr></thead><tbody>
+          <tr><td>Assignment #1</td><td>2026- 9월-08 14:08</td>
+          <td>2026- 9월-15 23:59</td><td>2026- 9월-15 14:08</td><td>100</td></tr>
+          <tr class="lastrow"><td colspan="5"><div class="no-overflow">
+            <h1>AI 실험</h1><h2>Goal</h2><p>직접 AI를 시험한다.</p>
+            <ol><li>잘한 사례</li><li>틀린 사례</li></ol>
+          </div></td></tr>
+        </tbody></table>
+        """
+
+        detail = parse_submission(page, 10, "turnitintooltwo")
+
+        self.assertEqual(detail.fields["Start date"], "2026- 9월-08 14:08")
+        self.assertEqual(detail.fields["Due date"], "2026- 9월-15 23:59")
+        self.assertEqual(detail.fields["Post date"], "2026- 9월-15 14:08")
+        self.assertIn("# AI 실험", detail.instructions)
+        self.assertIn("- 잘한 사례", detail.instructions)
+        self.assertIn("<h2>Goal</h2>", detail.instructions_html)
+
+    def test_standard_assignment_intro_and_inline_image_are_preserved(self):
+        page = """
+        <div id="intro" class="box generalbox"><div class="no-overflow">
+          <p>보고서 명세</p>
+          <img alt="양식" src="/pluginfile.php/1/mod_assign/intro/report.png">
+        </div></div>
+        <table><tr><td>Submission status</td><td>No submission</td></tr></table>
+        """
+
+        detail = parse_submission(page, 11, "assign")
+
+        self.assertIn("보고서 명세", detail.instructions)
+        self.assertEqual(len(detail.intro_files), 1)
+        self.assertEqual(detail.intro_files[0][0], "양식")
 
 
 class CompletionStateTests(unittest.TestCase):

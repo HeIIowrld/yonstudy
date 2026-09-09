@@ -72,7 +72,9 @@ CREATE TABLE IF NOT EXISTS submission (
     cmid INTEGER PRIMARY KEY,
     course_id INTEGER, modname TEXT, title TEXT,
     status TEXT, grading_status TEXT, due_at TEXT, last_modified TEXT,
-    grade TEXT, fields_json TEXT, submitted INTEGER, seen_at TEXT
+    grade TEXT, fields_json TEXT, submitted INTEGER, seen_at TEXT,
+    instructions TEXT,
+    instructions_html TEXT
 );
 
 -- 첨부/제출/자료 파일. content는 blobs/ 아래에 sha256으로 저장.

@@ -91,6 +91,31 @@ class StoreMigrationTests(unittest.TestCase):
 
             self.assertIn("checked_at", columns)
 
+    def test_existing_submission_table_gets_instruction_columns(self):
+        with tempfile.TemporaryDirectory() as root:
+            database = sqlite3.connect(Path(root) / "db.sqlite")
+            database.execute(
+                """
+                CREATE TABLE submission (
+                    cmid INTEGER PRIMARY KEY,
+                    course_id INTEGER, modname TEXT, title TEXT,
+                    status TEXT, grading_status TEXT, due_at TEXT,
+                    last_modified TEXT, grade TEXT, fields_json TEXT,
+                    submitted INTEGER, seen_at TEXT
+                )
+                """
+            )
+            database.commit()
+            database.close()
+
+            store = Store(root)
+            columns = {
+                row[1] for row in store.db.execute("PRAGMA table_info(submission)")
+            }
+
+            self.assertIn("instructions", columns)
+            self.assertIn("instructions_html", columns)
+
 
 class VodCompletionEventTests(unittest.TestCase):
     def test_completion_event_waits_for_max_position(self):

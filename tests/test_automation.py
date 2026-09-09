@@ -1,10 +1,58 @@
+import os
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from yonstudy.automation import run_scheduled_watch
+from yonstudy.automation import run_daily_automation, run_scheduled_watch
 from yonstudy.store import Store
+from yonstudy.video_archive import VideoArchiveResult
+
+
+class DailyArchivePolicyTests(unittest.TestCase):
+    def test_daily_archive_collects_full_course_content_and_all_vods_by_default(self):
+        with tempfile.TemporaryDirectory() as root:
+            course = SimpleNamespace(
+                course_id=1, year="2026", semester="2학기", title="테스트"
+            )
+            archiver = MagicMock()
+            archiver.sync_courses.return_value = [course]
+            client = MagicMock()
+            sink = MagicMock()
+            direct = SimpleNamespace(destination="archive:", uploaded_files=0)
+            archived = VideoArchiveResult(eligible=3)
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("yonstudy.automation.current_term", return_value=("2026", "2학기")),
+                patch("yonstudy.automation.LearnUsClient", return_value=client),
+                patch("yonstudy.automation.ensure_session", return_value=SimpleNamespace(relogged=False)),
+                patch("yonstudy.automation.Archiver", return_value=archiver),
+                patch("yonstudy.automation.RcloneRemote", return_value=sink),
+                patch("yonstudy.automation.sync_remote_tree", return_value=direct),
+                patch("yonstudy.automation.archive_course_vods", return_value=archived) as archive_vods,
+                patch("yonstudy.automation.build_daily_report", return_value=object()),
+                patch("yonstudy.automation.render_report", return_value="report"),
+            ):
+                code, state = run_daily_automation(
+                    store_path=root,
+                    cookie_path="unused",
+                    export_dir="unused",
+                    remote="archive:",
+                    send_mail=False,
+                )
+
+            self.assertEqual(code, 0)
+            archiver.sync_course.assert_called_once_with(
+                course,
+                probe_vod=True,
+                fetch_subtitles=True,
+                fetch_files=True,
+                fetch_boards=True,
+                board_pages=0,
+            )
+            self.assertIsNone(archive_vods.call_args.kwargs["limit"])
+            self.assertEqual(state["video_archive"]["eligible"], 3)
 
 
 class ScheduledWatchTests(unittest.TestCase):

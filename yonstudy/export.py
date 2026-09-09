@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import html as html_mod
 import json
 import re
 import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .daily import SEOUL
 
@@ -46,10 +47,127 @@ class ExportResult:
     courses: int = 0
     material_files: int = 0
     board_attachments: int = 0
+    assignment_files: int = 0
+    subtitle_files: int = 0
     posts: int = 0
+    course_indexes: int = 0
+    assignment_specs: int = 0
     copied_files: int = 0
     copied_bytes: int = 0
     missing_blobs: int = 0
+
+
+def course_archive_root(course: dict) -> PurePosixPath:
+    return PurePosixPath(
+        _safe(term_folder(course["year"], course["semester"])),
+        _safe(course.get("slug") or course.get("title") or course.get("name")),
+    )
+
+
+def course_index_path(course: dict) -> str:
+    return str(course_archive_root(course) / "강좌정보.md")
+
+
+def assignment_spec_path(course: dict, assignment: dict, extension: str = ".md") -> str:
+    from .flat_layout import canonical_filename, week_number
+
+    title = assignment.get("title") or f"과제_{assignment['cmid']}"
+    week = week_number(
+        assignment.get("section_idx"), assignment.get("section_name"), title
+    )
+    filename = canonical_filename(
+        week=week,
+        lesson=0,
+        kind="과제명세",
+        title=title,
+        stable_id=f"cmid{assignment['cmid']}",
+        extension=extension,
+    )
+    return str(course_archive_root(course) / "과제자료" / _safe(title) / filename)
+
+
+def _submission_fields(assignment: dict) -> dict:
+    try:
+        value = json.loads(assignment.get("fields_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def render_assignment_markdown(course: dict, assignment: dict) -> bytes:
+    fields = _submission_fields(assignment)
+    start = fields.get("Start date") or fields.get("시작 일시") or "알 수 없음"
+    due = assignment.get("due_at") or fields.get("Due date") or "알 수 없음"
+    post_date = fields.get("Post date") or "알 수 없음"
+    activity_url = assignment.get("url") or "없음"
+    body = "\n".join([
+        f"# {assignment.get('title') or '(제목 없음)'}", "",
+        f"- 과목: {course.get('title') or course.get('name')}",
+        f"- 주차: {assignment.get('section_name') or '알 수 없음'}",
+        f"- 유형: {assignment.get('modname') or '알 수 없음'}",
+        f"- 상태: {assignment.get('status') or '알 수 없음'}",
+        f"- 시작: {start}",
+        f"- 마감: {due}",
+        f"- 성적 게시: {post_date}",
+        f"- 원문: {activity_url}", "",
+        "## 과제 명세", "",
+        assignment.get("instructions") or "(본문이 없거나 수집하지 못했습니다.)", "",
+    ])
+    return body.encode("utf-8")
+
+
+def render_assignment_html(course: dict, assignment: dict) -> bytes:
+    fields = _submission_fields(assignment)
+    start = fields.get("Start date") or fields.get("시작 일시") or "알 수 없음"
+    due = assignment.get("due_at") or fields.get("Due date") or "알 수 없음"
+    post_date = fields.get("Post date") or "알 수 없음"
+    esc = lambda value: html_mod.escape(str(value or "알 수 없음"))  # noqa: E731
+    instructions = assignment.get("instructions_html") or (
+        f"<p>{esc(assignment.get('instructions') or '본문이 없거나 수집하지 못했습니다.')}</p>"
+    )
+    body = f"""<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<title>{esc(assignment.get('title') or '과제 명세')}</title></head><body>
+<h1>{esc(assignment.get('title') or '(제목 없음)')}</h1>
+<ul>
+<li>과목: {esc(course.get('title') or course.get('name'))}</li>
+<li>주차: {esc(assignment.get('section_name'))}</li>
+<li>유형: {esc(assignment.get('modname'))}</li>
+<li>상태: {esc(assignment.get('status'))}</li>
+<li>시작: {esc(start)}</li>
+<li>마감: {esc(due)}</li>
+<li>성적 게시: {esc(post_date)}</li>
+<li>원문: <a href="{esc(assignment.get('url') or '')}">{esc(assignment.get('url') or '없음')}</a></li>
+</ul><hr>
+{instructions}
+</body></html>
+"""
+    return body.encode("utf-8")
+
+
+def render_course_index(course: dict, activities: list[dict]) -> bytes:
+    lines = [
+        f"# {course.get('name') or course.get('title') or '(강좌명 없음)'}", "",
+        f"- 강좌명: {course.get('title') or course.get('name')}",
+        f"- 학기: {course.get('year')} {course.get('semester')}",
+        f"- 강좌 ID: {course.get('course_id')}",
+        f"- 최종 상세 동기화: {course.get('detail_synced_at') or '알 수 없음'}", "",
+        "## 현재 활동", "",
+    ]
+    if not activities:
+        lines.append("- 확인된 활동 없음")
+    for activity in activities:
+        status = activity.get("submission_status")
+        if activity.get("modname") == "vod":
+            status = activity.get("vod_status") or status
+        suffix = f" · {status}" if status else ""
+        lines.append(
+            f"- [{activity.get('section_name') or '강의 개요'}] "
+            f"[{activity.get('modname') or '기타'}] {activity.get('title') or '(제목 없음)'}"
+            f"{suffix} · {activity.get('url') or 'URL 없음'}"
+        )
+    lines.append("")
+    return "\n".join(lines).encode("utf-8")
 
 
 def export_tree(
@@ -69,27 +187,53 @@ def export_tree(
     result = ExportResult(destination=str(root))
     courses = store.query(
         """
-        SELECT course_id,year,semester,name,title,slug
-          FROM course WHERE year=? AND semester=? ORDER BY name
+        SELECT course_id,year,semester,name,title,slug,archived_at,detail_synced_at
+          FROM course
+         WHERE year=? AND semester=? AND enrolled=1
+         ORDER BY name
         """,
         (year, semester),
     )
     result.courses = len(courses)
 
     for course in courses:
+        course = dict(course)
         term = _safe(term_folder(course["year"], course["semester"]))
         course_name = _safe(course["slug"] or course["title"] or course["name"])
         course_dir = root / term / course_name
         if not dry_run:
-            for category in ("게시판_첨부", "QNA_공지"):
+            for category in ("게시판_첨부", "QNA_공지", "과제자료", "제출물", "자막"):
                 (course_dir / category).mkdir(parents=True, exist_ok=True)
+
+        activities = [dict(row) for row in store.query(
+            """
+            SELECT a.cmid,a.modname,a.title,a.url,a.section_idx,a.section_name,
+                   a.completion,s.status AS submission_status,v.status AS vod_status
+              FROM activity a
+              LEFT JOIN submission s ON s.cmid=a.cmid
+              LEFT JOIN vod v ON v.cmid=a.cmid
+             WHERE a.course_id=? AND a.present=1
+             ORDER BY a.section_idx,a.cmid
+            """,
+            (course["course_id"],),
+        )]
+        index_body = render_course_index(course, activities)
+        index_target = root / course_index_path(course)
+        result.course_indexes += 1
+        if not index_target.is_file() or index_target.read_bytes() != index_body:
+            result.copied_files += 1
+            result.copied_bytes += len(index_body)
+            if not dry_run:
+                index_target.parent.mkdir(parents=True, exist_ok=True)
+                index_target.write_bytes(index_body)
 
         files = store.query(
             """
             SELECT f.id,f.cmid,f.role,f.name,f.sha256,f.bytes,f.saved_at,
                    a.title AS activity_title,a.section_idx,a.section_name,a.open_from
               FROM file f LEFT JOIN activity a ON a.cmid=f.cmid
-             WHERE f.course_id=? AND f.role IN ('resource','post')
+             WHERE f.course_id=?
+               AND f.role IN ('resource','post','submission','introattachment','subtitle')
              ORDER BY f.role,f.cmid,f.name
             """,
             (course["course_id"],),
@@ -104,10 +248,18 @@ def export_tree(
                     file_id=row["id"], open_from=row["open_from"],
                     saved_at=row["saved_at"],
                 ))
-            else:
+            elif row["role"] == "post":
                 result.board_attachments += 1
                 board = _safe(row["activity_title"], f"게시판_{row['cmid']}")
                 rel = Path("게시판_첨부") / board / _safe(f"{row['id']}_{base_name}")
+            elif row["role"] == "subtitle":
+                result.subtitle_files += 1
+                rel = Path("자막") / _safe(f"{row['id']}_{base_name}")
+            else:
+                result.assignment_files += 1
+                category = "제출물" if row["role"] == "submission" else "과제자료"
+                activity = _safe(row["activity_title"], f"과제_{row['cmid']}")
+                rel = Path(category) / activity / _safe(f"{row['id']}_{base_name}")
             source = store.blob_path(row["sha256"]) if row["sha256"] else None
             if source is None or not source.is_file():
                 result.missing_blobs += 1
@@ -164,6 +316,30 @@ def export_tree(
             if not dry_run:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(encoded)
+
+        assignments = [dict(row) for row in store.query(
+            """
+            SELECT s.*,a.url,a.section_idx,a.section_name
+              FROM submission s JOIN activity a ON a.cmid=s.cmid
+             WHERE s.course_id=? AND a.present=1
+             ORDER BY a.section_idx,s.cmid
+            """,
+            (course["course_id"],),
+        )]
+        result.assignment_specs += len(assignments)
+        for assignment in assignments:
+            for extension, body in (
+                (".md", render_assignment_markdown(course, assignment)),
+                (".html", render_assignment_html(course, assignment)),
+            ):
+                target = root / assignment_spec_path(course, assignment, extension)
+                if target.is_file() and target.read_bytes() == body:
+                    continue
+                result.copied_files += 1
+                result.copied_bytes += len(body)
+                if not dry_run:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(body)
 
     manifest = {
         **asdict(result),

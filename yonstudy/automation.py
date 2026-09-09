@@ -17,7 +17,7 @@ from .daily import (
 )
 from .remote import RcloneRemote, sync_remote_tree
 from .store import Store
-from .video_archive import archive_untracked_vods
+from .video_archive import archive_course_vods
 
 
 def run_daily_automation(
@@ -77,11 +77,11 @@ def run_daily_automation(
                     arc.sync_course(
                         course,
                         probe_vod=True,
-                        fetch_subtitles=False,
+                        fetch_subtitles=True,
                         # remote 연결이 없으면 첨부파일은 다음 실행에서 다시 받는다.
                         fetch_files=sink is not None,
                         fetch_boards=True,
-                        board_pages=3,
+                        board_pages=0,
                     )
                 except SessionExpired as exc:
                     errors.append({"course": course.title, "error": str(exc)})
@@ -124,10 +124,13 @@ def run_daily_automation(
                 }
                 exit_code = 1
             try:
-                archive_limit = max(
-                    1, int(os.environ.get("YONSTUDY_ARCHIVE_ONLY_LIMIT", "4"))
+                raw_limit = os.environ.get(
+                    "YONSTUDY_VIDEO_ARCHIVE_LIMIT",
+                    os.environ.get("YONSTUDY_ARCHIVE_ONLY_LIMIT", "0"),
                 )
-                archived = archive_untracked_vods(
+                configured_limit = int(raw_limit)
+                archive_limit = configured_limit if configured_limit > 0 else None
+                archived = archive_course_vods(
                     store, sink, year=year, semester=semester,
                     limit=archive_limit, client=client,
                 )

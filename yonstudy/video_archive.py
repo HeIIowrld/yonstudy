@@ -1,4 +1,4 @@
-"""진도를 추적하지 않는 VOD의 원본을 remote에 보관한다."""
+"""현재 학기의 접근 가능한 모든 VOD 원본을 remote에 보관한다."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from . import vod as V
 
 
 @dataclass
-class ArchiveOnlyResult:
-    mode: str = "archive-only-no-playback"
+class VideoArchiveResult:
+    mode: str = "archive-all-course-vods-no-playback"
     eligible: int = 0
     uploaded_files: int = 0
     uploaded_bytes: int = 0
@@ -25,10 +25,11 @@ def candidates(
     store, *, year: str, semester: str,
     course_ids: set[int] | None = None, limit: int | None = None,
 ) -> list[dict]:
-    """LMS가 애초에 진도를 추적하지 않는, 접근 가능한 VOD만 고른다.
+    """현재 수강 중인 강좌에서 접근 가능하고 원본 URL이 확인된 VOD를 고른다.
 
-    ``can_log_progress=0``만 보면 아직 기간이 열리지 않은 일반 출석 영상도 섞인다.
-    뷰어의 원래 ``is_progress`` 값이 명시적으로 false인 경우만 아카이브 전용이다.
+    원본 다운로드는 LearnUs 플레이어의 진도 기록 API를 호출하지 않으므로 진도 추적
+    여부와 무관하게 보관할 수 있다. 아직 공개되지 않았거나 접근이 제한된 영상은
+    다음 자동 동기화에서 URL이 확인된 뒤 후보가 된다.
     """
     course_sql = ""
     params: list[object] = [year, semester]
@@ -46,7 +47,6 @@ def candidates(
           JOIN course c ON c.course_id=v.course_id
          WHERE c.year=? AND c.semester=? AND c.enrolled=1
            AND a.present=1
-           AND v.is_progress=0
            AND v.status='ok'
            AND v.hls_url IS NOT NULL AND v.hls_url<>''
            AND COALESCE(a.restricted,0)=0
@@ -65,12 +65,12 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def archive_untracked_vods(
+def archive_course_vods(
     store, sink, *, year: str, semester: str,
     course_ids: set[int] | None = None, limit: int | None = None,
     client=None, dry_run: bool = False, download_fn=V.download,
-) -> ArchiveOnlyResult:
-    """진도 비추적 VOD를 임시 MP4로 받아 remote에 전송한다.
+) -> VideoArchiveResult:
+    """접근 가능한 현재 학기 VOD를 임시 MP4로 받아 remote에 전송한다.
 
     성공 여부는 ``file(role='video')``에 남긴다. 성공한 원격 파일은 다음 실행에서
     크기까지 확인해 건너뛰며, 임시 로컬 파일은 성공/실패와 무관하게 제거한다.
@@ -79,7 +79,7 @@ def archive_untracked_vods(
         store, year=year, semester=semester,
         course_ids=course_ids, limit=limit,
     )
-    result = ArchiveOnlyResult(eligible=len(rows))
+    result = VideoArchiveResult(eligible=len(rows))
     temp_root = Path(store.root) / "tmp"
     if not dry_run:
         temp_root.mkdir(parents=True, exist_ok=True)
@@ -174,3 +174,8 @@ def archive_untracked_vods(
         finally:
             store.commit()
     return result
+
+
+# 공개된 0.1 API와 기존 자동화 설정을 깨지 않기 위한 호환 이름이다.
+ArchiveOnlyResult = VideoArchiveResult
+archive_untracked_vods = archive_course_vods

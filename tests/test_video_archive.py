@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from yonstudy.store import Store
-from yonstudy.video_archive import archive_untracked_vods, candidates
+from yonstudy.video_archive import archive_course_vods, candidates
 
 
 class FakeSink:
@@ -24,7 +24,7 @@ class FakeSink:
         return True
 
 
-class ArchiveOnlyVideoTests(unittest.TestCase):
+class CourseVideoArchiveTests(unittest.TestCase):
     def test_withdrawn_course_video_is_not_an_archive_candidate(self):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
@@ -50,7 +50,7 @@ class ArchiveOnlyVideoTests(unittest.TestCase):
                 [],
             )
 
-    def test_only_untracked_video_is_archived_once(self):
+    def test_tracked_and_untracked_videos_are_archived_once(self):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
             store.save_course({
@@ -80,21 +80,24 @@ class ArchiveOnlyVideoTests(unittest.TestCase):
                 outputs.video.write_bytes(b"private lecture video")
                 return SimpleNamespace(ok=True, error="")
 
-            first = archive_untracked_vods(
+            first = archive_course_vods(
                 store, sink, year="2026", semester="2학기",
                 download_fn=fake_download,
             )
-            second = archive_untracked_vods(
+            second = archive_course_vods(
                 store, sink, year="2026", semester="2학기",
                 download_fn=fake_download,
             )
 
-            self.assertEqual(downloads, [10])
-            self.assertEqual(first.uploaded_files, 1)
-            self.assertEqual(second.skipped_files, 1)
-            record = store.file_record("https://example.test/vod/10", "video")
-            self.assertEqual(record["remote_status"], "ok")
-            self.assertEqual(record["bytes"], len(b"private lecture video"))
+            self.assertEqual(downloads, [10, 11])
+            self.assertEqual(first.uploaded_files, 2)
+            self.assertEqual(second.skipped_files, 2)
+            for cmid in (10, 11):
+                record = store.file_record(
+                    f"https://example.test/vod/{cmid}", "video"
+                )
+                self.assertEqual(record["remote_status"], "ok")
+                self.assertEqual(record["bytes"], len(b"private lecture video"))
             self.assertEqual(list((Path(root) / "tmp").glob("vod-*")), [])
             duration = store.query("SELECT duration_sec FROM vod WHERE cmid=10")[0]
             self.assertEqual(duration["duration_sec"], 15 * 60 + 12)

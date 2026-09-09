@@ -87,16 +87,17 @@ class OneDriveExportTests(unittest.TestCase):
         )
         self.assertEqual(first.material_files, 1)
         self.assertEqual(first.posts, 1)
-        self.assertEqual(first.copied_files, 2)
+        self.assertEqual(first.copied_files, 3)
         course_dir = Path(self.out.name) / "2026-2" / "TST1000_테스트과목"
         for category in ("게시판_첨부", "QNA_공지"):
             self.assertTrue((course_dir / category).is_dir())
+        self.assertTrue((course_dir / "강좌정보.md").is_file())
         self.assertFalse((course_dir / "강의자료").exists())
         files = [p for p in Path(self.out.name).rglob("*") if p.is_file()]
         material = next(p for p in files if p.name.endswith("강의안__f1.pdf"))
         self.assertEqual(material.parent, course_dir)
         self.assertTrue(material.name.startswith("W01-L02__강의자료__"))
-        post = next(p for p in files if p.suffix == ".md")
+        post = next(p for p in files if p.suffix == ".md" and "QNA_공지" in p.parts)
         self.assertIn("질문 본문", post.read_text(encoding="utf-8"))
 
         second = export_onedrive_tree(

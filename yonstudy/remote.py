@@ -10,7 +10,15 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from .daily import SEOUL
-from .export import _safe, term_folder
+from .export import (
+    _safe,
+    assignment_spec_path,
+    course_index_path,
+    render_assignment_html,
+    render_assignment_markdown,
+    render_course_index,
+    term_folder,
+)
 from .flat_layout import canonical_filename, lesson_number, resource_filename, week_number
 
 
@@ -26,7 +34,10 @@ class RemoteSyncResult:
     material_files: int = 0
     board_attachments: int = 0
     assignment_files: int = 0
+    subtitle_files: int = 0
     posts: int = 0
+    course_indexes: int = 0
+    assignment_specs: int = 0
     uploaded_files: int = 0
     uploaded_bytes: int = 0
     skipped_files: int = 0
@@ -202,6 +213,8 @@ class RcloneRemote:
             parts = (term, course, "제출물", _safe(activity_title), filename)
         elif role == "introattachment":
             parts = (term, course, "과제자료", _safe(activity_title), filename)
+        elif role == "subtitle":
+            parts = (term, course, "자막", filename)
         else:
             parts = (term, course, "기타", _safe(activity_title), filename)
         return str(PurePosixPath(*parts))
@@ -241,7 +254,7 @@ def sync_remote_tree(
     result = RemoteSyncResult(destination=sink.remote)
     courses = store.query(
         """
-        SELECT course_id,year,semester,name,title,slug
+        SELECT course_id,year,semester,name,title,slug,archived_at,detail_synced_at
           FROM course
          WHERE year=? AND semester=? AND enrolled=1
          ORDER BY name
@@ -251,12 +264,33 @@ def sync_remote_tree(
     result.courses = len(courses)
 
     for course in courses:
+        course = dict(course)
+        activities = [dict(row) for row in store.query(
+            """
+            SELECT a.cmid,a.modname,a.title,a.url,a.section_idx,a.section_name,
+                   a.completion,s.status AS submission_status,v.status AS vod_status
+              FROM activity a
+              LEFT JOIN submission s ON s.cmid=a.cmid
+              LEFT JOIN vod v ON v.cmid=a.cmid
+             WHERE a.course_id=? AND a.present=1
+             ORDER BY a.section_idx,a.cmid
+            """,
+            (course["course_id"],),
+        )]
+        index_body = render_course_index(course, activities)
+        if sink.upload_bytes(course_index_path(course), index_body, force=True):
+            result.uploaded_files += 1
+            result.uploaded_bytes += len(index_body)
+        else:
+            result.skipped_files += 1
+        result.course_indexes += 1
+
         files = store.query(
             """
             SELECT f.*,a.title AS activity_title,a.section_idx,a.section_name,a.open_from
               FROM file f LEFT JOIN activity a ON a.cmid=f.cmid
              WHERE f.course_id=?
-               AND f.role IN ('resource','post','submission','introattachment')
+               AND f.role IN ('resource','post','submission','introattachment','subtitle')
              ORDER BY f.role,f.cmid,f.name
             """,
             (course["course_id"],),
@@ -267,6 +301,8 @@ def sync_remote_tree(
                 result.material_files += 1
             elif role == "post":
                 result.board_attachments += 1
+            elif role == "subtitle":
+                result.subtitle_files += 1
             else:
                 result.assignment_files += 1
             desired = sink.file_path(
@@ -338,6 +374,30 @@ def sync_remote_tree(
                 result.uploaded_bytes += len(body)
             else:
                 result.skipped_files += 1
+
+        assignments = [dict(row) for row in store.query(
+            """
+            SELECT s.*,a.url,a.section_idx,a.section_name
+              FROM submission s JOIN activity a ON a.cmid=s.cmid
+             WHERE s.course_id=? AND a.present=1
+             ORDER BY a.section_idx,s.cmid
+            """,
+            (course["course_id"],),
+        )]
+        result.assignment_specs += len(assignments)
+        for assignment in assignments:
+            for extension, body in (
+                (".md", render_assignment_markdown(course, assignment)),
+                (".html", render_assignment_html(course, assignment)),
+            ):
+                relative = assignment_spec_path(course, assignment, extension)
+                # 과제 본문·기한은 같은 길이로 수정될 수도 있어 내용이 변할 수 있는
+                # 생성 문서는 크기만으로 동일하다고 판단하지 않는다.
+                if sink.upload_bytes(relative, body, force=True):
+                    result.uploaded_files += 1
+                    result.uploaded_bytes += len(body)
+                else:
+                    result.skipped_files += 1
 
     manifest = {
         **asdict(result), "year": year, "semester": semester,
