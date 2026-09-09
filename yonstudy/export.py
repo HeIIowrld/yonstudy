@@ -100,11 +100,17 @@ def render_assignment_markdown(course: dict, assignment: dict) -> bytes:
     due = assignment.get("due_at") or fields.get("Due date") or "알 수 없음"
     post_date = fields.get("Post date") or "알 수 없음"
     activity_url = assignment.get("url") or "없음"
-    body = "\n".join([
+    metadata = [
         f"# {assignment.get('title') or '(제목 없음)'}", "",
         f"- 과목: {course.get('title') or course.get('name')}",
         f"- 주차: {assignment.get('section_name') or '알 수 없음'}",
         f"- 유형: {assignment.get('modname') or '알 수 없음'}",
+    ]
+    if fields.get("Provider"):
+        metadata.append(f"- 제공자: {fields['Provider']}")
+    if fields.get("Maximum marks"):
+        metadata.append(f"- 총점: {fields['Maximum marks']}점")
+    metadata.extend([
         f"- 상태: {assignment.get('status') or '알 수 없음'}",
         f"- 시작: {start}",
         f"- 마감: {due}",
@@ -113,6 +119,7 @@ def render_assignment_markdown(course: dict, assignment: dict) -> bytes:
         "## 과제 명세", "",
         assignment.get("instructions") or "(본문이 없거나 수집하지 못했습니다.)", "",
     ])
+    body = "\n".join(metadata)
     return body.encode("utf-8")
 
 
@@ -125,6 +132,13 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
     instructions = assignment.get("instructions_html") or (
         f"<p>{esc(assignment.get('instructions') or '본문이 없거나 수집하지 못했습니다.')}</p>"
     )
+    provider = (
+        f"<li>제공자: {esc(fields['Provider'])}</li>" if fields.get("Provider") else ""
+    )
+    maximum = (
+        f"<li>총점: {esc(fields['Maximum marks'])}점</li>"
+        if fields.get("Maximum marks") else ""
+    )
     body = f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8">
 <title>{esc(assignment.get('title') or '과제 명세')}</title></head><body>
@@ -133,6 +147,8 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
 <li>과목: {esc(course.get('title') or course.get('name'))}</li>
 <li>주차: {esc(assignment.get('section_name'))}</li>
 <li>유형: {esc(assignment.get('modname'))}</li>
+{provider}
+{maximum}
 <li>상태: {esc(assignment.get('status'))}</li>
 <li>시작: {esc(start)}</li>
 <li>마감: {esc(due)}</li>

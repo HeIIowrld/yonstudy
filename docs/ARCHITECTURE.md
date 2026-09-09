@@ -81,7 +81,8 @@ vod         (cmid PK, course_id, uuid, hls_url, poster, subtitle_langs,
 submission  (cmid PK, course_id, modname, title,
              status, grading_status, due_at, last_modified, grade,
              fields_json, submitted, seen_at, instructions, instructions_html)
-             -- assign·turnitintooltwo·vpl·quiz·feedback·choice 를 한 테이블로 모은다
+             -- assign·turnitintooltwo·vpl·quiz·feedback·choice와 명세가 확인된
+             -- Gradescope LTI 과제를 한 테이블로 모은다
 
 post        (id PK, course_id, cmid, modname, post_id, thread_id,
              no, subject, writer, written_at, hits, replies, url, body,

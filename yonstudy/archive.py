@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 from . import parse as P
+from .lti import LtiArchiveError, fetch_lti_assignment
 from .client import LEARNUS, LearnUsClient
 from .store import Store, _now
 
@@ -239,6 +240,11 @@ class Archiver:
         for a in (x for x in activities if x.is_submission and not x.restricted):
             self._sync_submission(course, a, cdir, fetch_files)
 
+        # Gradescope처럼 LearnUs 밖에서 렌더링되는 LTI 과제도 실행 페이지의
+        # 공개 명세만 읽어 일반 과제와 같은 Markdown 내보내기 대상으로 만든다.
+        for a in (x for x in activities if x.modname == "lti" and not x.restricted):
+            self._sync_lti_assignment(course, a)
+
         # 공지와 Q&A는 ubboard와 forum 모두에 올라온다.
         if fetch_boards:
             for a in (x for x in activities if x.modname == "ubboard" and not x.restricted):
@@ -440,6 +446,46 @@ class Archiver:
                 self._fetch_file(course, a, url, name, "submission", cdir, sub)
             for name, url in d.intro_files:
                 self._fetch_file(course, a, url, name, "introattachment", cdir, sub)
+
+    def _sync_lti_assignment(self, course, a) -> None:
+        """LTI 인증 중간 폼을 읽기 전용으로 따라가 외부 과제 명세를 저장한다."""
+        try:
+            assignment = fetch_lti_assignment(self.c, a.cmid)
+        except LtiArchiveError as exc:
+            # 모든 LTI 활동이 과제인 것은 아니다. 지원하지 않는 외부 도구가
+            # 강좌 전체 동기화를 막지 않게 진단 로그만 남긴다.
+            self.s.log("lti", str(a.cmid), False, str(exc))
+            return
+        except Exception as exc:
+            self.s.log("lti", str(a.cmid), False, str(exc))
+            return
+
+        fields = {
+            "Provider": assignment.provider,
+            "Question count": str(assignment.question_count),
+        }
+        if assignment.total_points:
+            fields["Maximum marks"] = assignment.total_points
+        self.s.save_submission(
+            {
+                "cmid": a.cmid,
+                "course_id": course.course_id,
+                "modname": "lti",
+                "title": a.title or assignment.title,
+                "status": "제출 상태 미확인",
+                "fields_json": json.dumps(fields, ensure_ascii=False),
+                # 과제 명세 페이지 열람만으로 제출 여부를 추정하지 않는다.
+                "submitted": None,
+                "seen_at": _now(),
+                "instructions": assignment.instructions or None,
+                "instructions_html": assignment.instructions_html or None,
+            }
+        )
+        self.s.log("lti", str(a.cmid), True, assignment.provider)
+        self.say(
+            f"    [lti/{assignment.provider}] {a.title[:34]!r}"
+            f" — 명세 {assignment.question_count}문항"
+        )
 
     def _sync_board(self, course, a, cdir, max_pages: int, fetch_files: bool) -> None:
         """ubboard 게시판 — 목록을 페이지별로 훑고 새 글의 본문을 받는다.

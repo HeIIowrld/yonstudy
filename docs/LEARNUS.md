@@ -96,7 +96,7 @@ yontil 확장(`src/core/login/login-learnus.ts`)의 플로우를 이식했다.
 | `resource` | 26 | 표준 자료 | pluginfile |
 | `forum` | 11 | 포럼 | 토론 목록 → 글 |
 | `vpl` | 8 | 코딩 과제 | 2단계 조회 (아래) |
-| `lti` / `choice` | 2 / 2 | 외부도구 / 선택설문 | 메타만 |
+| `lti` / `choice` | 2 / 2 | 외부도구 / 선택설문 | Gradescope LTI 과제는 OIDC 실행 후 공개 문항 명세 수집 / choice는 제출 상태 |
 
 `label`(82)은 설명 텍스트라 활동에서 제외한다.
 
@@ -116,6 +116,7 @@ yontil 확장(`src/core/login/login-learnus.ts`)의 플로우를 이식했다.
 | `vpl` | `views/downloadsubmission.php?…&submissionid=N` 존재 | **제출 화면이 JS 렌더**라 본문 텍스트로는 판정 불가. `view.php`에서 `userid`를 뽑아 `forms/submissionview.php`로 한 번 더 들어가야 한다. `&amp;` 이스케이프 주의 |
 | `quiz` | `review.php?attempt=` 링크 수 | — |
 | `feedback` | 응답 완료 문구 | — |
+| `lti` (Gradescope) | `OnlineAssignmentSubmitter`의 공개 `outline` | LearnUs → Turnitin LTI 프록시 → Gradescope OIDC POST를 순서대로 거친다. 인증 폼은 허용 호스트에만 제출하며 답안·명단·사용자 ID·CSRF·제출 URL은 저장하지 않고 제목·문항·배점·안내·입력 종류만 Markdown/HTML로 보관 |
 
 ### 게시판 (`ubboard`)
 

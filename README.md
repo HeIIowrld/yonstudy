@@ -108,6 +108,7 @@ python cli.py status      # 지금까지 수집한 데이터 요약
 
 - 강좌와 주차별 활동 메타데이터
 - 강의자료, 게시판 첨부, 본인 제출 파일
+- LearnUs 과제 본문과 Gradescope LTI 문항 명세(HTML/Markdown)
 - 게시판·포럼 글과 본문
 - VOD 주소, 재생 가능 기간, 온라인 출석 진도
 - LearnUs에서 제공하는 자막

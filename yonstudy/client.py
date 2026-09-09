@@ -261,6 +261,37 @@ class LearnUsClient:
         # HTTP 상태 오류는 호출자에게 전달한다.
         return self._guard(go)
 
+    def submit(
+        self,
+        url: str,
+        data: dict[str, str],
+        referer: str = LEARNUS,
+    ) -> tuple[str, str]:
+        """HTML 폼을 제출하고 ``(본문, 최종 URL)``을 돌려준다.
+
+        일반 LearnUs 요청은 최종 URL이 필요 없지만 LTI/OIDC 연동은 여러 서비스의
+        POST 폼을 차례로 통과한다. 외부 도구 쪽 응답을 상태 변경 요청에 재사용하지
+        않도록 이 메서드는 폼 인코딩 POST만 지원한다.
+        """
+        self._throttle()
+        body = urllib.parse.urlencode(data).encode()
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "User-Agent": UA,
+                "Referer": referer,
+                "Accept-Language": "ko-KR,ko;q=0.9",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+
+        def go():
+            with self.opener.open(req, timeout=TIMEOUT) as resp:
+                return resp.read().decode("utf-8", "ignore"), resp.geturl()
+
+        return self._guard(go)
+
     # SSO 로그인
 
     def login(self, username: str, password: str) -> None:
