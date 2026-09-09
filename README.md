@@ -116,7 +116,7 @@ python cli.py status      # 지금까지 수집한 데이터 요약
 - LearnUs에서 제공하는 자막
 
 영상 MP4 본체는 단독 `archive`가 받지 않는다. 현재 학기 전체 원본 보관은
-`automate`가 매일 수행하며, 수동 실행은 `archive-videos`를 사용한다.
+`automate`가 6시간마다 수행하며, 수동 실행은 `archive-videos`를 사용한다.
 
 ```bash
 # 모든 강좌
@@ -296,7 +296,7 @@ yonstudy 자체를 Synology Container Manager에서 실행하고 GitHub의 새 �
 타이머와 같은 한국시간 일정을 실행하며, DB·쿠키·강의 파일은 이미지 밖의 NAS 볼륨에
 보존한다.
 
-## 일일 자동화
+## 정기 자동화
 
 `automate`는 현재 학기를 대상으로 아래 순서대로 동작한다.
 
@@ -563,7 +563,7 @@ DB에는 한 건만 남는다. 메타데이터 제목, 녹음시각 출처, 주�
 | `yonstudy-keepalive.timer` | 2시간마다 | 로그인 세션 유지 |
 | `yonstudy-monitor.timer` | 02:00 KST | VOD·출석부 읽기 전용 갱신 |
 | `yonstudy-watch.timer` | 02:30, 04:00, 05:30 KST | 회차마다 영상 최대 1편 재생 |
-| `yonstudy-daily.timer` | 08:10 KST | 현재 학기 수집과 remote 업로드 |
+| `yonstudy-daily.timer` | 00:10, 06:10, 12:10, 18:10 KST | 현재 학기 수집과 원격 업로드 |
 | `yonstudy-report.timer` | 09:00 KST | 최신 리포트 생성 및 선택적 메일 발송 |
 | `yonstudy-transcribe.timer` | 완료 30분 뒤 | 자막 없는 미디어 최대 1편 전사 |
 

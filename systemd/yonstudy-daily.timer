@@ -1,8 +1,11 @@
 [Unit]
-Description=Run yonstudy every day at 08:10 KST
+Description=Archive LearnUs materials every six hours
 
 [Timer]
-OnCalendar=*-*-* 08:10:00 Asia/Seoul
+OnCalendar=*-*-* 00:10:00 Asia/Seoul
+OnCalendar=*-*-* 06:10:00 Asia/Seoul
+OnCalendar=*-*-* 12:10:00 Asia/Seoul
+OnCalendar=*-*-* 18:10:00 Asia/Seoul
 Persistent=true
 RandomizedDelaySec=10m
 AccuracySec=1m

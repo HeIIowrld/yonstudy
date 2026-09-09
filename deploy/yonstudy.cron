@@ -16,6 +16,6 @@ YONSTUDY_BROWSER_CHANNEL=chrome
 0 4 * * * root /app/deploy/run-job.sh watch
 30 5 * * * root /app/deploy/run-job.sh watch
 
-# Archive first; send the report after the archive job releases the lock.
-10 8 * * * root /app/deploy/run-job.sh daily
+# Archive materials every six hours. The 06:10 run prepares the 09:00 report.
+10 */6 * * * root /app/deploy/run-job.sh daily
 0 9 * * * root /app/deploy/run-job.sh report
