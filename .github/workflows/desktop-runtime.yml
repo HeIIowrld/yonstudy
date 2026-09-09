@@ -15,7 +15,7 @@ permissions:
 
 env:
   WHISPER_CPP_COMMIT: 48f628a84833905ee4a0658ee6d4a5c915ce1997
-  VULKAN_SDK_VERSION: 1.3.290.0
+  VULKAN_SDK_VERSION: 1.4.350
   ARCHIVE_NAME: yonstudy-whisper-vulkan-v1.8.7-win-x64.zip
 
 jobs:
@@ -26,8 +26,15 @@ jobs:
         shell: pwsh
         run: |
           choco install vulkan-sdk --version $env:VULKAN_SDK_VERSION --yes --no-progress
-          "C:\VulkanSDK\$env:VULKAN_SDK_VERSION\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_SDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $sdk = Get-ChildItem C:\VulkanSDK -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName "Bin\glslc.exe") } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $sdk) {
+            throw "Installed Vulkan SDK directory was not found"
+          }
+          (Join-Path $sdk.FullName "Bin") | Out-File -FilePath $env:GITHUB_PATH -Append
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Fetch pinned whisper.cpp source
         shell: pwsh
