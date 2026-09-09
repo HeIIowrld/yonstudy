@@ -3,6 +3,8 @@ name: Build desktop Whisper runtime
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - .github/workflows/desktop-runtime.yml
     tags:
