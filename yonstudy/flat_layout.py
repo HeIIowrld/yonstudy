@@ -7,13 +7,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .export import term_folder
+from .filename_normalization import nfc
 
 
 MAX_FILENAME_BYTES = 150
 
 
 def _clean(value: str | None, fallback: str = "이름없음") -> str:
-    value = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", value or "")
+    value = nfc(re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", value or ""))
     value = re.sub(r"\s+", " ", value).strip(" ._")
     return value or fallback
 

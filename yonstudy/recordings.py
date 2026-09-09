@@ -709,7 +709,9 @@ def discover_recordings(
 
 
 def _safe_name(value: str, limit: int = 120) -> str:
-    value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value).strip(" ._") or "녹음"
+    from .filename_normalization import nfc
+
+    value = nfc(re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value)).strip(" ._") or "녹음"
     return value.encode("utf-8")[:limit].decode("utf-8", "ignore").rstrip(" ._") or "녹음"
 
 

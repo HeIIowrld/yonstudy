@@ -19,6 +19,7 @@ SFTP, WebDAV, OneDrive 같은 rclone 저장소에 증분 업로드할 수 있다
 | VOD·출석부만 확인 | `monitor` | 영상을 재생하지 않고 시청 순서 갱신 |
 | 재생 대상 확인/실행 | `plan`, `watch` | 현재 학기 미완료 영상 재생 및 진도 재확인 |
 | 영상 파생 파일 만들기 | `download` | 오디오, 슬라이드 프레임, 선택적으로 MP4 생성 |
+| macOS 한글 파일명 복구 | `normalize-names` | 분해된 자모를 Windows 호환 NFC 파일명으로 변경 |
 | 빠진 자막 만들기 | `transcribe` | 폴더를 재귀 검색해 로컬 Whisper SRT 생성 |
 | 강의안과 자막 연결 | `analyze` | PDF 페이지와 자막 구간을 정렬한 리포트 생성 |
 | 시간표 가져오기 | `timetable-import` | TOML/JSON/CSV 수업 시간을 강좌와 연결해 저장 |
@@ -152,6 +153,27 @@ python cli.py archive --year 2026 --no-vod --no-subtitles --no-files
 ```
 
 같은 명령을 다시 실행하면 저장된 항목을 확인한 뒤 새 항목과 변경된 항목만 처리한다.
+
+### macOS 한글 파일명 복구
+
+새로 수집하거나 내보내는 파일명은 한글 자모가 분리되지 않도록 NFC 조합형으로
+저장한다. 기존 아카이브나 macOS에서 옮겨 온 폴더도 파일과 하위 폴더 이름을 재귀적으로
+복구할 수 있다. 먼저 변경 목록과 이름 충돌을 확인한 뒤 실행한다.
+
+```bash
+python cli.py normalize-names "/data/LearnUs" --dry-run
+python cli.py normalize-names "/data/LearnUs"
+```
+
+Windows에서는 경로만 Windows 형식으로 지정하면 된다.
+
+```powershell
+python cli.py normalize-names "D:\LearnUs" --dry-run
+python cli.py normalize-names "D:\LearnUs"
+```
+
+조합형 이름이 이미 있어 충돌하는 항목은 덮어쓰지 않고 건너뛰며 종료 코드 `1`을
+반환한다.
 
 ## 리포트
 

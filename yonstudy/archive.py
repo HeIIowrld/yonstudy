@@ -15,6 +15,7 @@ from . import parse as P
 from .lti import LtiArchiveError, fetch_lti_assignment
 from .oj import OjArchiveError, enrich_with_yonsei_oj
 from .client import LEARNUS, LearnUsClient
+from .filename_normalization import nfc
 from .store import Store, _now
 
 MAX_INLINE_FILE = int(os.environ.get("YONSTUDY_MAX_FILE_MB", "512")) * 1024 * 1024
@@ -375,7 +376,7 @@ class Archiver:
         if not body.lstrip().startswith(b"WEBVTT"):
             return
         digest, size = self.s.put_blob(body)
-        safe = re.sub(r'[\\/:*?"<>|]', "_", a.title)[:60].strip()
+        safe = nfc(re.sub(r'[\\/:*?"<>|]', "_", a.title))[:60].strip()
         name = f"{safe}.{lang}.vtt"
         self.s.link_into_course(digest, f"{cdir}/subtitles", name)
         self.s.save_file(
@@ -818,7 +819,7 @@ class Archiver:
         return True
 
     def _save_bytes(self, course, a, body, url, name, role, cdir, subdir) -> None:
-        safe = re.sub(r'[\\/:*?"<>|]', "_", name)[:80]
+        safe = nfc(re.sub(r'[\\/:*?"<>|]', "_", name))[:80]
         if self.file_sink is not None:
             digest = hashlib.sha256(body).hexdigest()
             size = len(body)
@@ -852,7 +853,7 @@ class Archiver:
             self.s.save_file(
                 {
                     "course_id": course.course_id, "cmid": a.cmid, "role": role,
-                    "name": name, "url": url, "sha256": None, "bytes": len(body),
+                    "name": nfc(name), "url": url, "sha256": None, "bytes": len(body),
                     "saved_at": _now(),
                 }
             )

@@ -204,6 +204,31 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_normalize_names(args) -> int:
+    """기존 아카이브의 macOS 분해형 파일명을 NFC로 복구한다."""
+    from yonstudy.filename_normalization import normalize_tree
+
+    try:
+        result = normalize_tree(args.path, dry_run=args.dry_run)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    action = "변경 예정" if args.dry_run else "변경"
+    for change in result.changes:
+        print(f"  {change.source} -> {change.target}")
+    for failure in result.failures:
+        print(
+            f"  ! 건너뜀: {failure.source} -> {failure.target} ({failure.reason})",
+            file=sys.stderr,
+        )
+    print(
+        f"파일명 NFC 정규화: {result.scanned}개 확인, "
+        f"{result.renamed}개 {action}, 충돌/오류 {len(result.failures)}개"
+    )
+    return 1 if result.failures else 0
+
+
 def cmd_plan(args) -> int:
     from yonstudy.autoplay import build_plan
     from yonstudy.daily import SEOUL, current_term
@@ -841,6 +866,15 @@ def main() -> int:
     sub.add_parser("courses").set_defaults(fn=cmd_courses)
     sub.add_parser("keepalive", help="로그인 세션 유휴 만료 방지").set_defaults(fn=cmd_keepalive)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    normalize_names = sub.add_parser(
+        "normalize-names",
+        help="macOS에서 분리된 한글 파일·폴더명을 Windows용 NFC로 복구",
+    )
+    normalize_names.add_argument("path", help="정규화할 아카이브 폴더")
+    normalize_names.add_argument(
+        "--dry-run", action="store_true", help="실제 변경 없이 결과만 확인"
+    )
+    normalize_names.set_defaults(fn=cmd_normalize_names)
     sub.add_parser("plan").set_defaults(fn=cmd_plan)
 
     a = sub.add_parser("archive")

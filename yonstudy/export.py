@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from .daily import SEOUL
+from .filename_normalization import nfc
 
 
 TERM_CODES = {
@@ -26,7 +27,7 @@ def term_folder(year: str, semester: str) -> str:
 
 
 def _safe(value: str | None, fallback: str = "이름없음", limit: int = 180) -> str:
-    value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value or "").strip(" .")
+    value = nfc(re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value or "")).strip(" .")
     value = value or fallback
     return value.encode("utf-8")[:limit].decode("utf-8", "ignore").rstrip(" .") or fallback
 

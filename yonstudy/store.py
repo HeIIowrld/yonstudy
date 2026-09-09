@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .filename_normalization import nfc
 from .progress import progress_verified
 
 
@@ -261,7 +262,7 @@ class Store:
 
     def link_into_course(self, digest: str, course_dir: str, filename: str) -> Path:
         """blob을 강좌 폴더에 사람이 읽을 이름으로 하드링크한다."""
-        dest = self.root / "courses" / course_dir / filename
+        dest = self.root / "courses" / nfc(course_dir) / nfc(filename)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists():
             src = self.blob_path(digest)
