@@ -1,0 +1,12 @@
+[Unit]
+Description=Scan lecture archive for missing subtitles every 30 minutes
+
+[Timer]
+OnBootSec=10m
+OnUnitInactiveSec=30m
+RandomizedDelaySec=5m
+AccuracySec=1m
+Unit=yonstudy-transcribe.service
+
+[Install]
+WantedBy=timers.target

@@ -40,3 +40,12 @@ jobs:
           tags: yonstudy:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.transcribe
+          platforms: linux/amd64
+          push: false
+          tags: yonstudy-transcriber:ci
+          cache-from: type=gha,scope=transcriber
+          cache-to: type=gha,mode=max,scope=transcriber

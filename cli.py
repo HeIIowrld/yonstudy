@@ -52,6 +52,26 @@ DEFAULT_RECORDING_INBOX = os.environ.get(
 )
 DEFAULT_TIMETABLE = os.environ.get("YONSTUDY_TIMETABLE")
 DEFAULT_RECORDING_DESTINATION = os.environ.get("YONSTUDY_RECORDING_DESTINATION")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+DEFAULT_TRANSCRIBE_ROOT = os.environ.get("YONSTUDY_TRANSCRIBE_ROOT")
+DEFAULT_TRANSCRIBE_MODEL = os.environ.get("YONSTUDY_TRANSCRIBE_MODEL", "medium")
+DEFAULT_TRANSCRIBE_DEVICE = os.environ.get("YONSTUDY_TRANSCRIBE_DEVICE", "auto")
+DEFAULT_TRANSCRIBE_COMPUTE_TYPE = os.environ.get(
+    "YONSTUDY_TRANSCRIBE_COMPUTE_TYPE", "auto"
+)
+DEFAULT_TRANSCRIBE_LANGUAGE = os.environ.get("YONSTUDY_TRANSCRIBE_LANGUAGE", "auto")
+DEFAULT_TRANSCRIBE_MODEL_CACHE = os.environ.get("YONSTUDY_TRANSCRIBE_MODEL_CACHE")
+DEFAULT_TRANSCRIBE_HOTWORDS = os.environ.get("YONSTUDY_TRANSCRIBE_HOTWORDS")
+DEFAULT_TRANSCRIBE_STABLE_SECONDS = _env_int("YONSTUDY_TRANSCRIBE_STABLE_SECONDS", 120)
+DEFAULT_TRANSCRIBE_CPU_THREADS = _env_int("YONSTUDY_TRANSCRIBE_CPU_THREADS", 0)
 try:
     DEFAULT_RECORDING_STABLE_SECONDS = int(
         os.environ.get("YONSTUDY_RECORDING_STABLE_SECONDS", "120")
@@ -573,6 +593,71 @@ def cmd_analyze(args) -> int:
     return analyze_lecture(Store(args.store), cmid=args.cmid, slides=args.slides)
 
 
+def cmd_transcribe(args) -> int:
+    """폴더에서 자막이 빠진 미디어만 로컬 Whisper로 전사한다."""
+    from dataclasses import asdict
+
+    from yonstudy.transcribe import transcribe_directory
+
+    if not args.path:
+        print(
+            "대상 폴더를 지정하세요: python cli.py transcribe /path/to/2026-2\n"
+            "또는 YONSTUDY_TRANSCRIBE_ROOT 환경 변수를 설정하세요.",
+            file=sys.stderr,
+        )
+        return 2
+    language_value = args.language.strip()
+    language = (
+        None
+        if not language_value or language_value.casefold() == "auto"
+        else language_value
+    )
+    try:
+        result = transcribe_directory(
+            args.path,
+            model=args.model,
+            device=args.device,
+            compute_type=args.compute_type,
+            language=language,
+            beam_size=args.beam_size,
+            vad_filter=not args.no_vad,
+            hotwords_file=args.hotwords_file,
+            model_cache=args.model_cache,
+            cpu_threads=args.cpu_threads,
+            recursive=not args.no_recursive,
+            stable_seconds=args.stable_seconds,
+            force=args.force,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            say=print,
+        )
+    except (
+        FileNotFoundError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        print(f"전사 실패: {exc}", file=sys.stderr)
+        return 2
+
+    print(
+        f"미디어 {result.media_files}개 · 기존 자막 {result.existing_subtitles}개 · "
+        f"안정화 대기 {result.unstable_files}개 · 대상 {result.selected_files}개"
+    )
+    if args.dry_run:
+        for item in result.items:
+            print(f"  {item['media']} → {item['subtitle']}")
+    else:
+        print(
+            f"완료 {result.completed_files}개 · 실패 {result.failed_files}개 · "
+            f"실행 중 변경/건너뜀 "
+            f"{result.changed_during_run + result.skipped_during_run}개"
+        )
+    if args.json:
+        print(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
+    return 1 if result.failed_files else 0
+
+
 def cmd_timetable_import(args) -> int:
     """외부 TOML/JSON/CSV 시간표를 녹음 분류용으로 저장한다."""
     from dataclasses import asdict
@@ -847,6 +932,49 @@ def main() -> int:
     dl.add_argument("--force", action="store_true", help="디스크 경고를 무시하고 진행")
     dl.add_argument("--dry-run", action="store_true")
     dl.set_defaults(fn=cmd_download)
+
+    transcription = sub.add_parser(
+        "transcribe",
+        help="폴더를 재귀 검색해 자막 없는 미디어를 로컬 Whisper로 전사",
+    )
+    transcription.add_argument(
+        "path", nargs="?", default=DEFAULT_TRANSCRIBE_ROOT,
+        help="학기/아카이브 폴더 (기본: YONSTUDY_TRANSCRIBE_ROOT)",
+    )
+    transcription.add_argument("--model", default=DEFAULT_TRANSCRIBE_MODEL)
+    transcription.add_argument(
+        "--device", choices=("auto", "cpu", "cuda"),
+        default=DEFAULT_TRANSCRIBE_DEVICE,
+    )
+    transcription.add_argument(
+        "--compute-type", default=DEFAULT_TRANSCRIBE_COMPUTE_TYPE,
+        help="auto, int8, float16 등 CTranslate2 연산 형식",
+    )
+    transcription.add_argument(
+        "--language", default=DEFAULT_TRANSCRIBE_LANGUAGE,
+        help="언어 코드, 기본값 auto는 강의별 자동 감지",
+    )
+    transcription.add_argument("--beam-size", type=int, default=1)
+    transcription.add_argument("--no-vad", action="store_true", help="무음 구간 필터를 끔")
+    transcription.add_argument("--hotwords-file", default=DEFAULT_TRANSCRIBE_HOTWORDS)
+    transcription.add_argument("--model-cache", default=DEFAULT_TRANSCRIBE_MODEL_CACHE)
+    transcription.add_argument(
+        "--cpu-threads", type=int, default=DEFAULT_TRANSCRIBE_CPU_THREADS,
+    )
+    transcription.add_argument("--no-recursive", action="store_true")
+    transcription.add_argument(
+        "--stable-seconds", type=int, default=DEFAULT_TRANSCRIBE_STABLE_SECONDS,
+        help="마지막 수정 후 이 시간만큼 지난 파일만 처리 (기본 120초)",
+    )
+    transcription.add_argument("--limit", type=int)
+    transcription.add_argument(
+        "--force",
+        action="store_true",
+        help="기존 자막이 있어도 대상 .srt를 다시 생성",
+    )
+    transcription.add_argument("--dry-run", action="store_true")
+    transcription.add_argument("--json", action="store_true")
+    transcription.set_defaults(fn=cmd_transcribe)
 
     layout = sub.add_parser(
         "layout-plan",

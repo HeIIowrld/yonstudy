@@ -14,6 +14,7 @@ yonstudy/
 │   ├── export.py            로컬 폴더 내보내기
 │   ├── daily.py             일일 리포트와 메일
 │   ├── vod.py               HLS 산출물 추출(ffmpeg)
+│   ├── transcribe.py        폴더형 아카이브의 누락 자막 로컬 전사
 │   ├── progress.py          진도율·최대 학습 위치 공통 완료 판정
 │   ├── autoplay.py          진도 스케줄러와 재생 워커(Playwright)
 │   ├── recordings.py        시간표 가져오기, 녹음시각 판정과 과목 자동 분류

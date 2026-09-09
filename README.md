@@ -19,6 +19,7 @@ SFTP, WebDAV, OneDrive 같은 rclone 저장소에 증분 업로드할 수 있다
 | VOD·출석부만 확인 | `monitor` | 영상을 재생하지 않고 시청 순서 갱신 |
 | 재생 대상 확인/실행 | `plan`, `watch` | 현재 학기 미완료 영상 재생 및 진도 재확인 |
 | 영상 파생 파일 만들기 | `download` | 오디오, 슬라이드 프레임, 선택적으로 MP4 생성 |
+| 빠진 자막 만들기 | `transcribe` | 폴더를 재귀 검색해 로컬 Whisper SRT 생성 |
 | 강의안과 자막 연결 | `analyze` | PDF 페이지와 자막 구간을 정렬한 리포트 생성 |
 | 시간표 가져오기 | `timetable-import` | TOML/JSON/CSV 수업 시간을 강좌와 연결해 저장 |
 | 수업 녹음 정리 | `classify-recordings` | 녹음 시각을 시간표와 대조해 과목별로 자동 분류 |
@@ -77,7 +78,7 @@ sudo apt install ffmpeg
 python -m pip install pypdf
 
 # 로컬 음성 전사
-python -m pip install faster-whisper
+python -m pip install "faster-whisper==1.2.1"
 
 # VOD 브라우저 재생
 python -m pip install playwright
@@ -372,6 +373,76 @@ python cli.py download --course 285311 --limit 3
 `--timeout`으로 영상별 제한 시간을 지정할 수 있고, `--force`를 붙이면 디스크 예상 용량
 검사를 통과하지 않아도 실행한다.
 
+### 폴더에서 빠진 자막 만들기
+
+Windows 데스크톱에서 가장 간단하게 쓰려면
+[`desktop/강의_자막_생성.py`](desktop/강의_자막_생성.py) 파일 하나만 학기 폴더에 복사한다.
+그 파일을 더블클릭하면 자신의 위치를 학기 루트로 삼아 바로 실행한다. 별도 경로 설정이나
+명령 입력은 필요 없다.
+
+```text
+2026-2/
+├── 강의_자막_생성.py          ← 더블클릭
+├── BIZ4208_확률적재고관리모델/
+└── 다른 과목/
+```
+
+처음 실행할 때 사용자 `%LOCALAPPDATA%/yonstudy-transcriber`에 `whisper.cpp` 런타임과
+`medium-q5_0` 모델을 내려받는다. 이 모델은 다국어 `medium`을 양자화해 메모리 사용량을
+낮춘 버전이다. 모델과 임시 WAV는 학기 폴더나 NAS에 넣지 않는다. 강의마다 언어를 자동
+감지하여 한국어는 `.ko.srt`, 영어는 `.en.srt`로 저장한다. Python 3.10 이상이 Windows x64
+데스크톱에 설치되어 있어야 한다.
+
+장치는 `CUDA → Vulkan → CPU` 순서로 자동 선택한다. NVIDIA 드라이버가 있으면 CUDA를
+먼저 사용하고, CUDA가 없거나 실행에 실패하면 AMD, Intel, NVIDIA GPU에서 사용할 수 있는
+Vulkan을 시도한다. Vulkan도 사용할 수 없으면 CPU로 같은 파일을 다시 처리한다. 백엔드가
+달라져도 하나의 모델 파일을 공유하므로 모델을 중복으로 내려받지 않는다. 기본 사용자는
+장치를 설정할 필요가 없다.
+
+`transcribe`는 DB나 LearnUs 로그인 없이 지정한 폴더 아래의 영상과 음성 파일을 재귀
+검색한다.
+원본과 같은 이름의 `.srt` 또는 `.vtt`가 하나라도 있으면 건너뛰고, 없을 때만 원본 옆에
+확장자를 제외한 원본 파일명 뒤에 `.ko.srt`를 붙여 자막을 만든다. 먼저 실제로 처리될
+파일을 확인한다.
+
+```bash
+python cli.py transcribe '/mnt/hyunjin/homes/hjpark/02_Personal/01_학교/10.학기/2026-2' --dry-run
+python cli.py transcribe '/mnt/hyunjin/homes/hjpark/02_Personal/01_학교/10.학기/2026-2'
+```
+
+Windows에서 저장소를 실행한다면 UNC 경로도 그대로 지정할 수 있다.
+
+```powershell
+py cli.py transcribe "\\hyunjin\homes\hjpark\02_Personal\01_학교\10.학기\2026-2" --dry-run
+```
+
+저장소의 `transcribe` 명령과 Docker 전사기는 `faster-whisper` 기반이며, 기본값은
+`medium` 모델과 강의별 언어 자동 감지다. CPU에서는 `int8`, NVIDIA GPU에서는
+`float16`을 사용한다. 언어를 고정하려면 `--language ko`, 모델을 바꾸려면
+`--model large-v3`처럼 지정한다. Vulkan 자동 선택은 위의 Windows 단일 파일에만
+적용된다.
+전문 용어를 한 줄에 하나씩 적은 파일은 `--hotwords-file terms.txt`로 전달할 수 있다.
+
+마지막 수정 후 120초가 지나지 않은 파일은 복사 중일 수 있어 다음 실행으로 미룬다. 전사
+도중 원본의 크기나 수정 시각이 달라져도 임시 자막을 버리고 재시도한다. SRT는 완성된 뒤
+같은 디렉터리에서 이름을 바꾸므로 NAS 또는 동기화 클라이언트에 미완성 파일이 노출되지
+않는다.
+기존 자막을 의도적으로 다시 만들 때만 `--force`를 쓴다.
+
+OneDrive와 Google Drive는 로컬 동기화 폴더 또는 `rclone mount` 경로를 지정한다. 온라인
+전용 파일은 읽는 순간 내려받기가 시작될 수 있으므로 장시간 운용할 서버에서는 오프라인
+보관 폴더나 NAS 마운트를 권장한다. Whisper는 자막까지만 만들며, 강의 요약은 별도 LLM 또는
+추출 요약 단계를 나중에 연결해야 한다.
+
+Docker Compose에서는 CPU 전사기를 선택적 프로필로 켠다. 호스트 경로는
+`YONSTUDY_ARCHIVE_DIR`, 컨테이너 안에서 스캔할 학기는 `YONSTUDY_TRANSCRIBE_ROOT`에
+`/archive/2026-2`처럼 지정한다. 30분 간격으로 한 번에 한 편씩 처리한다.
+
+```bash
+docker compose --profile transcription up -d --build transcriber
+docker compose logs -f transcriber
+```
+
 ### 강의안과 자막 정렬
 
 ```bash
@@ -472,6 +543,7 @@ DB에는 한 건만 남는다. 메타데이터 제목, 녹음시각 출처, 주�
 | `yonstudy-watch.timer` | 02:30, 04:00, 05:30 KST | 회차마다 영상 최대 1편 재생 |
 | `yonstudy-daily.timer` | 08:10 KST | 현재 학기 수집과 remote 업로드 |
 | `yonstudy-report.timer` | 09:00 KST | 최신 리포트 생성 및 선택적 메일 발송 |
+| `yonstudy-transcribe.timer` | 완료 30분 뒤 | 자막 없는 미디어 최대 1편 전사 |
 
 먼저 예제 환경 파일을 복사하고 설치 경로, remote, 로그인 및 메일 값을 채운다.
 
@@ -504,6 +576,9 @@ sudo systemctl enable --now yonstudy-keepalive.timer yonstudy-monitor.timer
 
 # 예약 영상 재생
 sudo systemctl enable --now yonstudy-watch.timer
+
+# 로컬 Whisper 자막 생성(환경 파일에 YONSTUDY_TRANSCRIBE_ROOT 설정 후)
+sudo systemctl enable --now yonstudy-transcribe.timer
 ```
 
 기능을 끌 때는 해당 타이머만 비활성화한다.
@@ -543,6 +618,13 @@ systemctl list-timers 'yonstudy-*'
 | `YONSTUDY_RECORDING_DESTINATION` | 분류된 녹음을 둘 평면 아카이브 루트 |
 | `YONSTUDY_RECORDING_STABLE_SECONDS` | 두 스캔 사이 파일 안정화 시간. 기본 120초 |
 | `YONSTUDY_TIMETABLE` | 매 핫폴더 스캔 전에 가져올 TOML/JSON/CSV 시간표 |
+| `YONSTUDY_TRANSCRIBE_ROOT` | 자막 누락을 재귀 검색할 학기 또는 아카이브 폴더 |
+| `YONSTUDY_TRANSCRIBE_MODEL` | faster-whisper 모델. 기본 `medium` |
+| `YONSTUDY_TRANSCRIBE_DEVICE` | `auto`, `cpu`, `cuda`. 기본 `auto` |
+| `YONSTUDY_TRANSCRIBE_COMPUTE_TYPE` | 기본 `auto`(CPU `int8`, CUDA `float16`) |
+| `YONSTUDY_TRANSCRIBE_LANGUAGE` | 음성 언어 코드. 기본 `auto`, 한국어 고정은 `ko` |
+| `YONSTUDY_TRANSCRIBE_STABLE_SECONDS` | 수정 직후 파일의 처리 유예. 기본 120초 |
+| `YONSTUDY_TRANSCRIBE_MODEL_CACHE` | 다운로드한 모델을 보존할 경로 |
 
 ## 저장되는 파일
 

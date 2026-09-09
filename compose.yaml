@@ -47,3 +47,32 @@ services:
       options:
         max-size: 5m
         max-file: "2"
+
+  transcriber:
+    profiles: ["transcription"]
+    image: yonstudy-transcriber:local
+    build:
+      context: ${YONSTUDY_BUILD_CONTEXT}
+      dockerfile: Dockerfile.transcribe
+    container_name: yonstudy-transcriber
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Seoul
+      YONSTUDY_TRANSCRIBE_ROOT: ${YONSTUDY_TRANSCRIBE_ROOT:-/archive}
+      YONSTUDY_TRANSCRIBE_MODEL: ${YONSTUDY_TRANSCRIBE_MODEL:-medium}
+      YONSTUDY_TRANSCRIBE_DEVICE: ${YONSTUDY_TRANSCRIBE_DEVICE:-cpu}
+      YONSTUDY_TRANSCRIBE_COMPUTE_TYPE: ${YONSTUDY_TRANSCRIBE_COMPUTE_TYPE:-int8}
+      YONSTUDY_TRANSCRIBE_LANGUAGE: ${YONSTUDY_TRANSCRIBE_LANGUAGE:-auto}
+      YONSTUDY_TRANSCRIBE_STABLE_SECONDS: ${YONSTUDY_TRANSCRIBE_STABLE_SECONDS:-120}
+      YONSTUDY_TRANSCRIBE_CPU_THREADS: ${YONSTUDY_TRANSCRIBE_CPU_THREADS:-0}
+      YONSTUDY_TRANSCRIBE_INTERVAL: ${YONSTUDY_TRANSCRIBE_INTERVAL:-1800}
+      YONSTUDY_TRANSCRIBE_LIMIT: ${YONSTUDY_TRANSCRIBE_LIMIT:-1}
+      YONSTUDY_TRANSCRIBE_MODEL_CACHE: /models
+    volumes:
+      - ${YONSTUDY_ARCHIVE_DIR}:/archive
+      - ${YONSTUDY_DATA_DIR}/models:/models
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

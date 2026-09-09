@@ -38,6 +38,17 @@ sudo docker compose up -d
 sudo docker compose ps
 ```
 
+To create missing subtitles on the NAS CPU, set the transcription variables in
+`deploy/synology.env.example` to the target semester and enable the optional
+profile. The transcriber is separate from the scheduler, so its image and model
+are not downloaded unless the profile is enabled. Its `/models` bind mount
+preserves the model cache across container replacements.
+
+```bash
+sudo docker compose --profile transcription up -d --build transcriber
+sudo docker compose logs -f transcriber
+```
+
 To enable recording classification, copy `deploy/timetable.toml.example` to
 `config/timetable.toml`, replace its course IDs with values from `courses`, and
 enable `YONSTUDY_TIMETABLE=/config/timetable.toml` in `config/yonstudy.env`.
