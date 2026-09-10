@@ -23,7 +23,7 @@ def _seconds_label(value: int | None) -> str | None:
 
 
 def attendance_snapshot(store, *, year: str, semester: str) -> list[dict]:
-    """온라인출석부의 콘텐츠 길이·최대 학습위치·진도율을 같은 행으로 반환한다."""
+    """온라인 출석부의 콘텐츠 길이, 최대 학습 위치, 진도율을 같은 행으로 반환한다."""
     rows = store.query(
         """
         SELECT c.course_id,c.name AS course_name,a.cmid,a.title,a.section_idx,

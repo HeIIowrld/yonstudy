@@ -129,7 +129,13 @@ def find_activity_ids(page: str) -> set[int]:
             r"\bclass\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I
         )
         classes = set(class_attr.group(2).split()) if class_attr else set()
-        if "modtype_label" not in classes and "label" not in classes:
+        # 활동 설명 안의 임의 HTML에도 ``id="module-N"``이 들어갈 수 있다.
+        # 실제 Moodle 활동 행은 항상 activity 클래스를 가지므로 그 행만 센다.
+        if (
+            "activity" in classes
+            and "modtype_label" not in classes
+            and "label" not in classes
+        ):
             found.add(int(module_id.group(2)))
     return found
 
@@ -162,7 +168,7 @@ KNOWN_MODULES = {
     "folder": "폴더 자료",
     "zoom": "실시간 화상강의",
     "url": "외부 링크",
-    "turnitintooltwo": "Turnitin 표절검사 제출",
+    "turnitintooltwo": "Turnitin 표절 검사 제출",
     "resource": "표준 자료",
     "forum": "포럼",
     "vpl": "코딩 과제 Virtual Programming Lab",
@@ -188,7 +194,7 @@ class Activity:
     # VOD 전용
     open_from: str | None = None  # "2026-03-04 00:00:00"
     open_to: str | None = None
-    late_until: str | None = None  # "(지각 : …)" 로 표기되는 지각 인정 기한
+    late_until: str | None = None  # "(지각 : …)"로 표기되는 지각 인정 기한
     duration: str | None = None  # "33:59" 또는 "1:02:33"
     restricted: bool = False
 
@@ -324,11 +330,11 @@ _LATE = re.compile(r"지각\s*[:：]\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
 def _period_and_duration(blob: str) -> dict:
-    """학습기간·지각기한·재생시간.
+    """학습 기간, 지각 기한, 재생 시간을 읽는다.
 
-    697개 VOD 중 94개(13.5%)는 학습기간 표기가 아예 없다 — 진도처리기간 미설정 강좌.
-    일부 강좌는 정규기간 뒤에 "(지각 : …)"로 지각 인정 기한을 따로 둔다.
-    재생시간은 MM:SS와 HH:MM:SS 두 포맷이 모두 쓰인다.
+    697개 VOD 중 94개(13.5%)는 진도 처리 기간이 설정되지 않아 학습 기간 표기가 없다.
+    일부 강좌는 정규 기간 뒤에 "(지각 : …)"로 지각 인정 기한을 따로 둔다.
+    재생 시간은 MM:SS와 HH:MM:SS 두 형식이 모두 쓰인다.
     """
     period = _PERIOD.search(blob)
     late = _LATE.search(blob)
@@ -439,7 +445,7 @@ _PROGRESS_PARAMS = [
     "f_flag",          # f  0이면 이어보기/이동제한 분기 활성
     "g_ts",            # g
     "h_num",           # h
-    "progress_period", # i  진도처리기간 여부
+    "progress_period", # i  진도 처리 기간 여부
     "courseid",        # j
     "cmid",            # k
     "trackid",         # l
@@ -498,7 +504,7 @@ class VodViewer:
 
 
 def _js_args(raw: str) -> list:
-    """progress(...) 호출의 인자 문자열을 파이썬 값 리스트로 변환."""
+    """`progress(...)` 호출의 인자 문자열을 파이썬 값 목록으로 변환한다."""
     try:
         return json.loads("[" + raw.replace("\\/", "/") + "]")
     except json.JSONDecodeError:
@@ -1007,7 +1013,7 @@ class Post:
 
 
 def _plugin_assets(blob: str, marker: str) -> list[tuple[str, str]]:
-    """본문에 붙은 파일 — 첨부 링크(href)와 본문 삽입 이미지(img src)를 모두 모은다."""
+    """본문의 첨부 링크(`href`)와 삽입 이미지(`img src`)를 모두 모은다."""
     out, seen = [], set()
     for name, url in parse_pluginfiles(blob):
         if marker in url and url not in seen:
@@ -1159,7 +1165,7 @@ def parse_forum_posts(page: str) -> list[dict]:
 
 
 def find_user_id(page: str) -> str | None:
-    """내 Moodle userid — VPL/Turnitin 상세 조회에 필요하다."""
+    """VPL과 Turnitin 상세 조회에 필요한 내 Moodle `userid`를 찾는다."""
     # HTML에서 &가 &amp;로 이스케이프돼 있어 그대로 두면 매칭되지 않는다.
     plain = html_mod.unescape(page)
     m = re.search(r"[?&]userid=(\d+)", plain) or re.search(
@@ -1173,7 +1179,7 @@ def parse_assign(page: str, cmid: int) -> AssignDetail:
     return parse_submission(page, cmid, "assign")
 
 
-# 모든 페이지의 첨부파일
+# 모든 페이지의 첨부 파일
 
 
 def parse_pluginfiles(page: str) -> list[tuple[str, str]]:

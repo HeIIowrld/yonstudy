@@ -213,7 +213,7 @@ def export_tree(
 ) -> ExportResult:
     """자료/게시판을 내보낸다. 기존 대상 파일은 지우지 않는 증분 복사다."""
     # flat_layout은 term_folder를 이 모듈에서 가져오므로 순환 import를 피하기 위해
-    # 실행 시점에 공통 강의자료 파일명 함수를 불러온다.
+    # 실행 시점에 공통 강의 자료 파일명 함수를 불러온다.
     from .flat_layout import resource_filename
 
     root = Path(destination)

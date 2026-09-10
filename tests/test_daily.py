@@ -180,9 +180,9 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(report.new_files[0]["name"], "1주차 강의안.pdf")
         body = render_report(report)
         self.assertIn("새 Q&A·공지·게시글", body)
-        self.assertIn("새 강의자료·첨부", body)
+        self.assertIn("새 강의 자료 및 첨부 파일", body)
         self.assertIn("[테스트과목] [Q&A · Anonymous Q&A Board]", body)
-        self.assertIn("[테스트과목] [강의자료 · 활동명 없음] 1주차 강의안.pdf", body)
+        self.assertIn("[테스트과목] [강의 자료 · 활동명 없음] 1주차 강의안.pdf", body)
 
     def test_normal_and_late_deadlines_are_distinguished(self):
         row = self.activity("n")

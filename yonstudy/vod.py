@@ -286,7 +286,7 @@ MB_PER_MIN = {"audio": 0.17, "frames": 0.12, "video": 3.20}
 
 
 def estimate(rows: list[dict]) -> tuple[float, dict[str, float]]:
-    """(총 시간, 산출물별 예상 GB). duration이 없는 편은 평균으로 보정한다."""
+    """총 시간과 산출물별 예상 용량(GB)을 반환한다. 길이가 없는 영상은 평균으로 보정한다."""
     known = [r["duration_sec"] for r in rows if r.get("duration_sec")]
     avg = (sum(known) / len(known)) if known else 0
     minutes = sum((r.get("duration_sec") or avg) for r in rows) / 60

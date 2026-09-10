@@ -79,7 +79,7 @@ def resource_filename(
     open_from: str | None = None,
     saved_at: str | None = None,
 ) -> str:
-    """과목 루트에 둘 강의자료의 정렬 가능한 파일명을 만든다.
+    """과목 루트에 둘 강의 자료의 정렬 가능한 파일명을 만든다.
 
     주차 정보가 있으면 ``W01-L02``를, 없으면 공개일/수집일 ``YYYYMMDD``를
     접두어로 쓴다. 종류와 고정 ID도 남겨 다른 루트 파일과 이름이 겹치지 않는다.

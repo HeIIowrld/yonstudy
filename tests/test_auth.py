@@ -42,7 +42,7 @@ class AutoLoginTests(unittest.TestCase):
     def test_missing_credentials_does_not_attempt_login(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
             client = FakeClient([(False, None)])
-            with self.assertRaisesRegex(AutoLoginUnavailable, "자격증명 미설정"):
+            with self.assertRaisesRegex(AutoLoginUnavailable, "자격 증명 미설정"):
                 ensure_session(client, state_path=Path(tmp) / "auth.json")
             self.assertEqual(client.logins, [])
 

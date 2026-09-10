@@ -63,6 +63,20 @@ class RosterAndActivityMarkupTests(unittest.TestCase):
 
         self.assertEqual([row.cmid for row in activities], [10])
 
+    def test_module_like_id_inside_activity_description_is_ignored(self):
+        page = """
+        <li id="module-10" class="activity url modtype_url">
+          <a href="/mod/url/view.php?id=10">
+            <span class="instancename">실습 코드</span>
+          </a>
+          <div class="contentafterlink">
+            <ul><li id="module-999">설명 안에서 우연히 사용한 ID</li></ul>
+          </div>
+        </li>
+        """
+
+        self.assertEqual(find_activity_ids(page), {10})
+
 
 class SubmissionParsingTests(unittest.TestCase):
     def test_turnitin_dates_and_inline_instructions_are_preserved(self):

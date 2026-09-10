@@ -250,7 +250,7 @@ def import_timetable(
     valid_to: str | None = None,
     commit: bool = True,
 ) -> TimetableImportResult:
-    """TOML/JSON/CSV 시간표를 저장한다. 같은 파일을 다시 읽으면 해당 원본만 교체한다."""
+    """TOML/JSON/CSV 시간표를 저장한다. 같은 파일을 다시 읽으면 그 원본만 교체한다."""
     path = Path(path).expanduser().resolve()
     defaults, raw_rows = _load_timetable(path)
     year = str(year or defaults.get("year") or "") or None
@@ -389,7 +389,7 @@ def _metadata_datetime(value: object, timezone: ZoneInfo) -> datetime | None:
 
 
 def probe_media(path: str | Path) -> tuple[object | None, float, str | None]:
-    """ffprobe가 있으면 컨테이너 생성시각과 길이를 읽고, 없으면 조용히 폴백한다."""
+    """ffprobe가 있으면 컨테이너 생성 시각과 길이를 읽고, 없으면 조용히 폴백한다."""
     try:
         result = subprocess.run(
             [
@@ -669,7 +669,7 @@ def match_recording(
         )
     return Match(
         status="unclassified",
-        details={"note": "녹음 시각에 해당하는 수업이나 파일명 과목 단서가 없음"},
+        details={"note": "녹음 시각과 일치하는 수업이나 파일명의 과목 단서가 없음"},
     )
 
 

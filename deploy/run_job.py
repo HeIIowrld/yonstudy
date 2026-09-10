@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import os
+import random
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from pathlib import Path
 CONFIG = Path("/config/yonstudy.env")
 LOG = Path("/data/logs/scheduler.log")
 LOCK = "/run/yonstudy/automation.lock"
+WATCH_JITTER_SECONDS = 45 * 60
 
 JOBS: dict[str, tuple[list[str], bool]] = {
     "recordings": (
@@ -51,6 +54,18 @@ def stamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def scheduled_delay_seconds(job: str) -> int:
+    """Spread automated lecture starts without delaying unrelated jobs."""
+    if job != "watch":
+        return 0
+    raw = os.environ.get("YONSTUDY_WATCH_JITTER_SECONDS", str(WATCH_JITTER_SECONDS))
+    try:
+        maximum = max(0, int(raw))
+    except ValueError:
+        maximum = WATCH_JITTER_SECONDS
+    return random.randint(0, maximum) if maximum else 0
+
+
 def job_environment(path: Path = CONFIG) -> dict[str, str]:
     """Build a cron-safe environment while allowing explicit config overrides."""
     env = os.environ.copy()
@@ -82,6 +97,11 @@ def main() -> int:
 
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("a", encoding="utf-8") as output:
+        delay = scheduled_delay_seconds(job)
+        if delay:
+            output.write(f"{stamp()} [{job}] waiting {delay}s jitter\n")
+            output.flush()
+            time.sleep(delay)
         output.write(f"{stamp()} [{job}] starting\n")
         output.flush()
         result = subprocess.run(

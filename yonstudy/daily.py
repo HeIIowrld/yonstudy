@@ -1,4 +1,4 @@
-"""한국시간 기준 LearnUs 일일 리포트와 메일 전송."""
+"""한국 시간 기준 LearnUs 일일 리포트와 메일 전송."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def _excerpt(value: str | None, limit: int = 180) -> str:
 
 def _file_category(role: str | None) -> str:
     return {
-        "resource": "강의자료",
+        "resource": "강의 자료",
         "post": "게시판 첨부",
         "submission": "과제 첨부",
     }.get(role or "", "첨부자료")
@@ -446,7 +446,7 @@ def build_daily_report(
             item["schedule_kind"] = "오늘 공개"
             today_schedule.append(item)
 
-    # 온라인출석부의 최대 학습위치와 진도율을 함께 검증한다. 재생은 하지 않는다.
+    # 온라인 출석부의 최대 학습 위치와 진도율을 함께 검증한다. 재생은 하지 않는다.
     from .monitor import attendance_snapshot, viewing_queue
 
     viewing = viewing_queue(store, year=year, semester=semester, now=now)
@@ -686,7 +686,7 @@ def render_report(report: DailyReport) -> str:
         for r in report.new_posts
     ] or ["- 없음"]
 
-    lines += ["", f"새 강의자료·첨부 ({len(report.new_files)})"]
+    lines += ["", f"새 강의 자료 및 첨부 파일({len(report.new_files)})"]
     lines += [
         f"- [{r['course_name']}] [{_file_category(r.get('role'))} · "
         f"{r.get('board_name') or r.get('activity_title') or '활동명 없음'}] {r['name']}"
@@ -978,7 +978,7 @@ def render_email_text(report: DailyReport) -> str:
             for r in report.new_posts
         ]
     if report.new_files:
-        lines += ["", "새 강의자료·첨부"]
+        lines += ["", "새 강의 자료 및 첨부 파일"]
         lines += [
             f"- {r['course_name']} · {_file_category(r.get('role'))} · {r['name']}\n  {r.get('url') or ''}"
             for r in report.new_files
@@ -1216,7 +1216,7 @@ def render_report_html(report: DailyReport) -> str:
             )
         )
     if file_parts:
-        rows.append(section("새 강의자료·첨부", "".join(file_parts)))
+        rows.append(section("새 강의 자료 및 첨부 파일", "".join(file_parts)))
 
     covered_ids = {
         r.get("cmid") for r in (
@@ -1227,8 +1227,8 @@ def render_report_html(report: DailyReport) -> str:
         "vod": "동영상",
         "assign": "과제",
         "quiz": "퀴즈",
-        "ubfile": "강의자료",
-        "resource": "강의자료",
+        "ubfile": "강의 자료",
+        "resource": "강의 자료",
         "url": "링크",
     }
     important_updates = [
@@ -1275,7 +1275,7 @@ def send_report(
     sender: str | None = None,
     html_body: str | None = None,
 ) -> None:
-    """SMTP 환경변수가 있으면 SMTP, 아니면 로컬 sendmail을 사용한다.
+    """SMTP 환경 변수가 있으면 SMTP, 아니면 로컬 sendmail을 사용한다.
 
     YONSTUDY_SMTP_HOST/PORT/USER/PASSWORD/STARTTLS를 지원한다. 비밀번호는
     파일이나 DB에 저장하지 않는다.

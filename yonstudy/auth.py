@@ -1,6 +1,6 @@
 """LearnUs 백그라운드 작업용 세션 자동 복구.
 
-자격증명은 코드/DB가 아니라 systemd의 root 전용 EnvironmentFile에서만 읽는다.
+자격 증명은 코드나 DB가 아니라 systemd의 root 전용 EnvironmentFile에서만 읽는다.
 잘못된 비밀번호나 캡차로 계정이 잠기지 않도록 실패 시 지수형 백오프를 적용한다.
 """
 
@@ -17,7 +17,7 @@ BACKOFF_SECONDS = (15 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60)
 
 
 class AutoLoginUnavailable(RuntimeError):
-    """자격증명 누락, 백오프 또는 SSO 거부로 자동 로그인이 불가능함."""
+    """자격 증명 누락, 백오프 또는 SSO 거부로 자동 로그인을 진행할 수 없음."""
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ def ensure_session(
     password: str | None = None,
     now: datetime | None = None,
 ) -> AuthStatus:
-    """활성 세션을 보장하고, 만료됐으면 환경변수 자격증명으로 한 번 복구한다."""
+    """활성 세션을 보장하고, 만료됐으면 환경 변수의 자격 증명으로 한 번 복구한다."""
     alive, sesskey = client.session_info()
     state_path = Path(state_path)
     if alive:
@@ -73,7 +73,7 @@ def ensure_session(
     password = password or os.environ.get("LEARNUS_PW")
     if not username or not password:
         raise AutoLoginUnavailable(
-            "LearnUs 세션 만료 및 자동 로그인 자격증명 미설정: "
+            "LearnUs 세션 만료 및 자동 로그인 자격 증명 미설정: "
             "/etc/yonstudy/yonstudy.env에 LEARNUS_ID/LEARNUS_PW를 설정하세요"
         )
 

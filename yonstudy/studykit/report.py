@@ -80,7 +80,7 @@ def analyze_lecture(store, cmid: int, slides: str | None = None, window: float =
     s_script, t_script = A.script_of("\n".join(texts)), A.script_of(transcript_text)
     if s_script != t_script and "mixed" not in (s_script, t_script):
         print(f"  ! 언어 불일치: 슬라이드={s_script}, 전사={t_script}")
-        print("    교차언어 텍스트 정렬은 신뢰할 수 없어 타임라인을 생성하지 않습니다.")
+        print("    교차 언어 텍스트 정렬은 신뢰할 수 없어 타임라인을 생성하지 않습니다.")
         print("    (해결책: 영상 프레임의 슬라이드 전환 감지 — 언어와 무관하게 동작)")
         _transcript_only(chunks)
         return 0

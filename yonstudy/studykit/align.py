@@ -117,7 +117,7 @@ class SlideSpan:
 def align_slides(
     slide_texts: list[str], chunks: list[Cue], skip_penalty: float = 0.12
 ) -> list[SlideSpan]:
-    """슬라이드 i ↔ 전사 청크 j 를 단조 증가 경로로 맞춘다.
+    """슬라이드 i와 전사 청크 j를 단조 증가 경로로 맞춘다.
 
     각 청크는 정확히 하나의 슬라이드에 배정되고, 슬라이드 순서는 뒤집히지 않는다.
     """
@@ -187,7 +187,7 @@ def script_of(s: str) -> str:
 
 
 def neutral_tokens(s: str) -> set[str]:
-    """언어가 달라도 공유되는 토큰 — 라틴 약어/전문용어와 숫자."""
+    """언어가 달라도 공유되는 라틴 약어, 전문 용어, 숫자 토큰을 찾는다."""
     return {
         w.lower()
         for w in re.findall(r"[A-Za-z][A-Za-z0-9]{1,}|\d{2,}", s)
@@ -196,7 +196,7 @@ def neutral_tokens(s: str) -> set[str]:
 
 
 def match_score(slide_text: str, transcript_text: str) -> float:
-    """이 강의안이 이 전사와 같은 내용인지 0~1로 점수화.
+    """강의안과 전사의 내용 일치도를 0~1 사이로 점수화한다.
 
     같은 언어면 TF-IDF 코사인, 다른 언어면 라틴 약어·숫자 교집합 비율을 쓴다.
     """
@@ -210,7 +210,7 @@ def match_score(slide_text: str, transcript_text: str) -> float:
 
 
 def pick_slides(candidates: list, transcript_text: str) -> tuple[object, str, float] | None:
-    """후보 강의안 중 전사와 가장 잘 맞는 것을 고른다. (경로, 이름, 점수)"""
+    """후보 강의안 중 전사와 가장 잘 맞는 것을 골라 경로, 이름, 점수를 반환한다."""
     best = None
     for path, name in candidates:
         try:
@@ -239,7 +239,7 @@ def extract_hotwords(slide_text: str, extra: str = "", limit: int = 60) -> str:
         if key in _STOP or len(w) < 2:
             continue
         counts[key] += 1
-        # 강의안이 쓰는 표기를 유지한다 (vba가 아니라 VBA).
+        # 강의안이 쓰는 표기를 유지한다(vba가 아니라 VBA).
         if key not in case_of or w.isupper():
             case_of[key] = w
 
@@ -274,7 +274,7 @@ def extract_hotwords(slide_text: str, extra: str = "", limit: int = 60) -> str:
 
 
 def slide_deltas(slide_texts: list[str]) -> list[dict]:
-    """연속한 슬라이드 사이에 새로 등장/사라진 용어.
+    """연속한 슬라이드 사이에 새로 등장하거나 사라진 용어를 찾는다.
 
     강의 슬라이드는 앞 장을 조금씩 덧붙이며 진행하는 경우가 많아, 이 '증분'이
     그 장의 실제 주제다. 전사와 비교할 때 이 증분만 보면 신호 대 잡음비가 훨씬 좋다.
@@ -296,7 +296,7 @@ def slide_deltas(slide_texts: list[str]) -> list[dict]:
 
 
 def spoken_only(delta_added: list[str], spoken: str, slide_all: str) -> list[str]:
-    """전사에는 있는데 슬라이드에는 없는 용어 = 말로만 한 설명의 후보."""
+    """전사에는 있지만 슬라이드에는 없는 용어를 말로만 한 설명의 후보로 반환한다."""
     slide_vocab = set(tokenize(slide_all))
     spoken_terms = Counter(tokenize(spoken))
     return [

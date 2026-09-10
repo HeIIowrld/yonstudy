@@ -78,7 +78,7 @@ def run_daily_automation(
                         course,
                         probe_vod=True,
                         fetch_subtitles=True,
-                        # remote 연결이 없으면 첨부파일은 다음 실행에서 다시 받는다.
+                        # 원격 저장소 연결이 없으면 첨부 파일은 다음 실행에서 다시 받는다.
                         fetch_files=sink is not None,
                         fetch_boards=True,
                         board_pages=0,
@@ -280,7 +280,7 @@ def run_scheduled_watch(
     if not plan:
         return finish(0, "nothing_to_watch")
 
-    # 실행 직전에 후보 과목 하나만 새로 읽어 저장된 진도기간/진도를 갱신한다.
+    # 실행 직전에 후보 과목 하나만 새로 읽어 저장된 진도 처리 기간과 진도를 갱신한다.
     # 매번 전체 학기의 모든 VOD를 조회하면 학기 후반 요청량이 지나치게 커진다.
     candidate_ids = {job.course_id for job in plan[: max(1, limit)]}
     if archiver is not None:

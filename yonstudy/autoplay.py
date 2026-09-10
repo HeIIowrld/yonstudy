@@ -10,7 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from random import random
+from random import randint, random
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -18,6 +18,8 @@ from .progress import progress_verified
 
 VIEWER = "https://ys.learnus.org/mod/vod/viewer.php?id={cmid}"
 SEOUL = ZoneInfo("Asia/Seoul")
+INTER_VIDEO_DELAY_MIN_SECONDS = 60
+INTER_VIDEO_DELAY_MAX_SECONDS = 10 * 60
 
 
 def _dt(s: str | None) -> datetime | None:
@@ -78,7 +80,7 @@ def build_plan(
     4. 남은 재생 시간이 긴 순
 
     진도 추적 영상은 진도율과 최대 학습 위치가 모두 완주를 나타내지 않으면서
-    현재 진도처리기간인 경우만 고른다.
+    현재 진도 처리 기간인 경우만 고른다.
     ``include_untracked_once``를 켜면 진도율·완료 체크가 없는 영상도 공개 후
     한 번 완주 대상으로 넣는다.
 
@@ -268,7 +270,7 @@ def build_plan(
 
 
 def upcoming(store, now: datetime | None = None, days: int = 14) -> list[dict]:
-    """아직 열리지 않았지만 곧 열리는 영상 — 열리는 날 자동 편입 예약용."""
+    """아직 열리지 않았지만 곧 열리는 영상을 개시일에 자동 편입하도록 예약한다."""
     if now is None:
         now = datetime.now(SEOUL).replace(tzinfo=None)
     elif now.tzinfo is not None:
@@ -337,7 +339,7 @@ def _cookies_for_playwright(cookie_path: str) -> list[dict]:
 
 
 # 뷰어 안에서 재생 상태를 관찰하는 스크립트.
-# console.log를 건드리지 않는다 — viewer 페이지에 devtools 탐지 트랩이 있어서
+# viewer 페이지에 개발자 도구 탐지 트랩이 있으므로 console.log를 건드리지 않는다.
 # console을 가로채면 강제 로그아웃 폼이 제출될 수 있다.
 _WATCH_JS = """
 (rate) => {
@@ -355,6 +357,11 @@ _WATCH_JS = """
 """
 
 
+def inter_video_delay_seconds() -> int:
+    """Return the pause used between consecutive items in a playback queue."""
+    return randint(INTER_VIDEO_DELAY_MIN_SECONDS, INTER_VIDEO_DELAY_MAX_SECONDS)
+
+
 def run_plan(
     plan: list[Job],
     cookie_path: str,
@@ -370,6 +377,13 @@ def run_plan(
 
     if dry_run:
         print(f"[dry-run] {len(plan)}편, 총 {sum(j.eta_sec for j in plan)/3600:.1f}시간 예상")
+        if len(plan) > 1:
+            print(
+                "  영상 사이 대기: "
+                f"{INTER_VIDEO_DELAY_MIN_SECONDS // 60}~"
+                f"{INTER_VIDEO_DELAY_MAX_SECONDS // 60}분씩 "
+                f"{len(plan) - 1}회"
+            )
         for j in plan:
             print(f"  {j.rate}x  {j.course_name[:12]:12s} {j.title[:40]:40s} "
                   f"{j.remaining_sec//60}분 → {j.eta_sec/60:.0f}분")
@@ -408,6 +422,10 @@ def run_plan(
             return 1
 
         for i, job in enumerate(plan, 1):
+            if i > 1:
+                delay = inter_video_delay_seconds()
+                print(f"\n다음 영상까지 {delay // 60}분 {delay % 60}초 대기", flush=True)
+                time.sleep(delay)
             use_rate = min(rate or job.rate, job.rate)
             eta_sec = job.remaining_sec / max(use_rate, 0.25) * 1.08
             print(f"\n[{i}/{len(plan)}] {job.course_name} — {job.title}")

@@ -1,4 +1,4 @@
-"""SQLite 메타데이터와 sha256 기반 blob을 관리한다."""
+"""SQLite 메타데이터와 SHA-256 기반 `blob`을 관리한다."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ SEOUL = ZoneInfo("Asia/Seoul")
 
 
 def _now() -> str:
-    """LearnUs 화면의 날짜와 같은 한국시간으로 저장한다."""
+    """LearnUs 화면의 날짜와 같은 한국 시간으로 저장한다."""
     return datetime.now(SEOUL).strftime("%Y-%m-%dT%H:%M:%S")
 
 SCHEMA = """
@@ -296,7 +296,7 @@ class Store:
         )
 
     def has_missing_file(self, cmid: int, role: str) -> bool:
-        """로컬이나 remote에 저장되지 않아 다시 받아야 하는지 확인한다."""
+        """로컬이나 원격 저장소에 없어 다시 받아야 하는지 확인한다."""
         return (
             self.db.execute(
                 """
@@ -613,7 +613,7 @@ class Store:
             "SELECT 1 FROM file WHERE url=? AND role=?",
             (row.get("url"), row.get("role")),
         ).fetchone()
-        # 자막과 본인 제출물은 새 수업 자료 알림에서 제외한다. 강의자료와
+        # 자막과 본인 제출물은 새 수업 자료 알림에서 제외한다. 강의 자료와
         # 게시판 첨부는 최초 발견 시점을 남겨 일일 리포트에서 안정적으로 잡는다.
         if old is None and row.get("role") in {"resource", "post", "introattachment"}:
             self.record_change(
@@ -659,8 +659,10 @@ class Store:
         )
 
     def log(self, kind: str, ref: str, ok: bool, note: str = "") -> None:
-        """진단용 기록. 다른 프로세스가 DB를 쓰고 있으면 조용히 건너뛴다 —
-        로그 한 줄 때문에 긴 작업 전체가 죽으면 안 된다."""
+        """진단용 기록. 다른 프로세스가 DB를 쓰고 있으면 조용히 건너뛴다.
+
+        로그 한 줄 때문에 긴 작업 전체가 중단되어서는 안 된다.
+        """
         try:
             self.db.execute(
                 "INSERT INTO crawl_log (at, kind, ref, ok, note) VALUES (?,?,?,?,?)",

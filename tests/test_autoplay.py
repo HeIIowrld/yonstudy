@@ -1,10 +1,28 @@
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
-from yonstudy.autoplay import build_plan
+from yonstudy.autoplay import (
+    INTER_VIDEO_DELAY_MAX_SECONDS,
+    INTER_VIDEO_DELAY_MIN_SECONDS,
+    build_plan,
+    inter_video_delay_seconds,
+)
 from yonstudy.progress import progress_verified
 from yonstudy.store import Store
+
+
+class AutoplayDelayTests(unittest.TestCase):
+    def test_inter_video_delay_uses_configured_range(self):
+        with patch("yonstudy.autoplay.randint", return_value=347) as randint:
+            delay = inter_video_delay_seconds()
+
+        self.assertEqual(delay, 347)
+        randint.assert_called_once_with(
+            INTER_VIDEO_DELAY_MIN_SECONDS,
+            INTER_VIDEO_DELAY_MAX_SECONDS,
+        )
 
 
 class AutoplayPlanTests(unittest.TestCase):

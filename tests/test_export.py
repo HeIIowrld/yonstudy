@@ -1,7 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import cli
 from yonstudy.export import export_onedrive_tree, term_folder
 from yonstudy.store import Store
 
@@ -104,6 +107,30 @@ class OneDriveExportTests(unittest.TestCase):
             self.store, self.out.name, year="2026", semester="2학기"
         )
         self.assertEqual(second.copied_files, 0)
+
+    def test_cli_can_export_every_archived_term(self):
+        self.store.save_course(
+            {
+                "course_id": 2,
+                "year": "2025",
+                "semester": "2학기",
+                "name": "이전과목",
+                "title": "이전과목",
+                "slug": "OLD1000_이전과목",
+            }
+        )
+        self.store.commit()
+        args = SimpleNamespace(
+            store=self.tmp.name, destination=self.out.name,
+            year=None, semester=None, all_terms=True, dry_run=False,
+        )
+
+        with patch("builtins.print"):
+            code = cli.cmd_export(args)
+
+        self.assertEqual(code, 0)
+        self.assertTrue((Path(self.out.name) / "2025-2" / "OLD1000_이전과목").is_dir())
+        self.assertTrue((Path(self.out.name) / "2026-2" / "TST1000_테스트과목").is_dir())
 
 
 if __name__ == "__main__":

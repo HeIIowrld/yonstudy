@@ -148,7 +148,12 @@ def cmd_keepalive(args) -> int:
 
 def cmd_archive(args) -> int:
     store = Store(args.store)
-    arc = Archiver(get_client(args), store)
+    sink = None
+    if getattr(args, "remote", None):
+        from yonstudy.remote import RcloneRemote
+
+        sink = RcloneRemote(args.remote)
+    arc = Archiver(get_client(args), store, file_sink=sink)
     courses = arc.sync_courses()
     if args.year:
         courses = [c for c in courses if c.year in args.year]
@@ -246,11 +251,11 @@ def cmd_plan(args) -> int:
     )
     if not plan:
         print(
-            "자동수강 대상이 없습니다. "
+            "자동 수강 대상이 없습니다. "
             "(현재 수강 가능한 미완료 영상 또는 1회 재생 대상이 없음)"
         )
         return 0
-    print(f"\n=== 자동수강 계획: {len(plan)}편 ===")
+    print(f"\n=== 자동 수강 계획: {len(plan)}편 ===")
     for i, j in enumerate(plan, 1):
         print(
             f" {i:>3}. [{j.urgency:>6}] {j.course_name[:14]:14s} {j.title[:38]:38s} "
@@ -435,14 +440,28 @@ def cmd_export(args) -> int:
 
     today = datetime.now(SEOUL).date()
     default_year, default_semester = current_term(today)
-    result = export_tree(
-        Store(args.store),
-        args.destination,
-        year=args.year or default_year,
-        semester=args.semester or default_semester,
-        dry_run=args.dry_run,
-    )
-    print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
+    store = Store(args.store)
+    if getattr(args, "all_terms", False):
+        terms = [
+            (row["year"], row["semester"])
+            for row in store.query(
+                """SELECT DISTINCT year,semester FROM course
+                    WHERE enrolled=1 ORDER BY year,semester"""
+            )
+        ]
+    else:
+        terms = [(args.year or default_year, args.semester or default_semester)]
+    results = [
+        export_tree(
+            store, args.destination, year=year, semester=semester,
+            dry_run=args.dry_run,
+        ).__dict__
+        for year, semester in terms
+    ]
+    print(json.dumps(
+        results if len(results) != 1 else results[0],
+        ensure_ascii=False, indent=2,
+    ))
     return 0
 
 
@@ -451,75 +470,84 @@ cmd_export_onedrive = cmd_export
 
 
 def cmd_upload(args) -> int:
-    """이미 수집한 파일과 게시글을 rclone remote에 올린다."""
+    """이미 수집한 파일과 게시글을 rclone 원격 저장소에 올린다."""
     from yonstudy.daily import SEOUL, current_term
     from yonstudy.remote import RcloneRemote, sync_remote_tree
 
     default_year, default_semester = current_term(datetime.now(SEOUL).date())
-    year = args.year or default_year
-    semester = args.semester or default_semester
     store = Store(args.store)
-    if args.dry_run:
-        counts = {
-            row["role"]: row["count"]
+    if getattr(args, "all_terms", False):
+        terms = [
+            (row["year"], row["semester"])
             for row in store.query(
+                """SELECT DISTINCT year,semester FROM course
+                    WHERE enrolled=1 ORDER BY year,semester"""
+            )
+        ]
+    else:
+        terms = [(args.year or default_year, args.semester or default_semester)]
+    if args.dry_run:
+        summaries = []
+        for year, semester in terms:
+            counts = {
+                row["role"]: row["count"]
+                for row in store.query(
+                    """
+                    SELECT f.role,COUNT(*) AS count
+                     FROM file f JOIN course c ON c.course_id=f.course_id
+                     WHERE c.year=? AND c.semester=? AND c.enrolled=1
+                       AND f.role IN ('resource','post','submission','introattachment','subtitle')
+                     GROUP BY f.role
+                    """,
+                    (year, semester),
+                )
+            }
+            post_count = store.query(
                 """
-                SELECT f.role,COUNT(*) AS count
-                 FROM file f JOIN course c ON c.course_id=f.course_id
+                SELECT COUNT(*) AS count
+                  FROM post p JOIN course c ON c.course_id=p.course_id
                  WHERE c.year=? AND c.semester=? AND c.enrolled=1
-                   AND f.role IN ('resource','post','submission','introattachment','subtitle')
-                 GROUP BY f.role
+                   AND NOT (p.modname='forum' AND p.post_id LIKE 't%' AND p.body IS NULL)
                 """,
                 (year, semester),
-            )
-        }
-        post_count = store.query(
-            """
-            SELECT COUNT(*) AS count
-              FROM post p JOIN course c ON c.course_id=p.course_id
-             WHERE c.year=? AND c.semester=? AND c.enrolled=1
-               AND NOT (
-                   p.modname='forum'
-                   AND p.post_id LIKE 't%'
-                   AND p.body IS NULL
-               )
-            """,
-            (year, semester),
-        )[0]["count"]
-        course_count = store.query(
-            """
-            SELECT COUNT(*) AS count FROM course
-             WHERE year=? AND semester=? AND enrolled=1
-            """,
-            (year, semester),
-        )[0]["count"]
-        assignment_count = store.query(
-            """
-            SELECT COUNT(*) AS count
-              FROM submission s
-              JOIN course c ON c.course_id=s.course_id
-              JOIN activity a ON a.cmid=s.cmid
-             WHERE c.year=? AND c.semester=? AND c.enrolled=1 AND a.present=1
-            """,
-            (year, semester),
-        )[0]["count"]
-        print(json.dumps({
-            "mode": "dry-run",
-            "remote": args.remote,
-            "year": year,
-            "semester": semester,
-            "files": counts,
-            "posts": post_count,
-            "course_indexes": course_count,
-            "assignment_specs": assignment_count,
-        }, ensure_ascii=False, indent=2))
+            )[0]["count"]
+            course_count = store.query(
+                """SELECT COUNT(*) AS count FROM course
+                    WHERE year=? AND semester=? AND enrolled=1""",
+                (year, semester),
+            )[0]["count"]
+            assignment_count = store.query(
+                """
+                SELECT COUNT(*) AS count
+                  FROM submission s
+                  JOIN course c ON c.course_id=s.course_id
+                  JOIN activity a ON a.cmid=s.cmid
+                 WHERE c.year=? AND c.semester=? AND c.enrolled=1 AND a.present=1
+                """,
+                (year, semester),
+            )[0]["count"]
+            summaries.append({
+                "mode": "dry-run", "remote": args.remote,
+                "year": year, "semester": semester, "files": counts,
+                "posts": post_count, "course_indexes": course_count,
+                "assignment_specs": assignment_count,
+            })
+        print(json.dumps(
+            summaries if len(summaries) != 1 else summaries[0],
+            ensure_ascii=False, indent=2,
+        ))
         return 0
 
-    result = sync_remote_tree(
-        store, RcloneRemote(args.remote), year=year, semester=semester
-    )
-    print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
-    return 1 if result.missing_sources else 0
+    sink = RcloneRemote(args.remote)
+    results = [
+        sync_remote_tree(store, sink, year=year, semester=semester).__dict__
+        for year, semester in terms
+    ]
+    print(json.dumps(
+        results if len(results) != 1 else results[0],
+        ensure_ascii=False, indent=2,
+    ))
+    return 1 if any(result["missing_sources"] for result in results) else 0
 
 
 def cmd_automate(args) -> int:
@@ -553,7 +581,7 @@ def cmd_scheduled_watch(args) -> int:
 
 
 def cmd_download(args) -> int:
-    """동영상에서 오디오·슬라이드 프레임·(선택)영상 원본을 받는다."""
+    """동영상에서 오디오와 슬라이드 프레임을 받고, 필요하면 영상 원본도 받는다."""
     from yonstudy import vod as V
 
     store = Store(args.store)
@@ -705,7 +733,7 @@ def cmd_timetable_import(args) -> int:
 
 
 def cmd_classify_recordings(args) -> int:
-    """녹음 폴더를 스캔하고 시간표/파일명으로 과목별 분류한다."""
+    """녹음 폴더를 스캔하고 시간표와 파일명으로 과목별로 분류한다."""
     from yonstudy.recordings import (
         classify_recordings,
         import_timetable,
@@ -802,7 +830,7 @@ def cmd_layout_plan(args) -> int:
 
 
 def cmd_monitor(args) -> int:
-    """새 VOD와 온라인출석부를 갱신한다. 영상 재생·다운로드는 하지 않는다."""
+    """새 VOD와 온라인 출석부를 갱신한다. 영상은 재생하거나 다운로드하지 않는다."""
     from yonstudy.monitor import run_monitor
 
     code, state = run_monitor(
@@ -816,14 +844,15 @@ def cmd_monitor(args) -> int:
 
 
 def cmd_archive_only(args) -> int:
-    """현재 학기의 접근 가능한 모든 VOD를 재생 없이 remote에 보관한다."""
+    """선택한 학기의 접근 가능한 모든 VOD를 재생 없이 원격 저장소에 보관한다."""
     from dataclasses import asdict
     from yonstudy.daily import SEOUL, current_term
     from yonstudy.remote import RcloneRemote
     from yonstudy.video_archive import archive_course_vods
 
-    now = datetime.now(SEOUL)
-    year, semester = current_term(now.date())
+    default_year, default_semester = current_term(datetime.now(SEOUL).date())
+    year = args.year or default_year
+    semester = args.semester or default_semester
     store = Store(args.store)
     client = None
     course_ids = set(args.course or []) or None
@@ -888,6 +917,10 @@ def main() -> int:
     a.add_argument("--no-boards", action="store_true", help="게시판/포럼 글 수집 생략")
     a.add_argument("--board-pages", type=int, default=3,
                    help="게시판당 목록 페이지 수 (기본 3, 0이면 전체)")
+    a.add_argument(
+        "--remote",
+        help="큰 파일도 로컬 blob 제한 없이 지정한 rclone 원격 저장소로 직접 백필",
+    )
     a.set_defaults(fn=cmd_archive)
 
     w = sub.add_parser("watch")
@@ -919,11 +952,12 @@ def main() -> int:
 
     exp = sub.add_parser(
         "export", aliases=["export-onedrive"],
-        help="강의자료·게시글을 로컬 폴더로 내보내기",
+        help="강의 자료와 게시글을 로컬 폴더로 내보내기",
     )
     exp.add_argument("--destination", default=DEFAULT_EXPORT)
     exp.add_argument("--year")
     exp.add_argument("--semester")
+    exp.add_argument("--all-terms", action="store_true", help="DB의 모든 학기를 내보내기")
     exp.add_argument("--dry-run", action="store_true")
     exp.set_defaults(fn=cmd_export)
 
@@ -931,6 +965,7 @@ def main() -> int:
     upload.add_argument("--remote", default=DEFAULT_REMOTE)
     upload.add_argument("--year")
     upload.add_argument("--semester")
+    upload.add_argument("--all-terms", action="store_true", help="DB의 모든 학기를 업로드")
     upload.add_argument("--dry-run", action="store_true")
     upload.set_defaults(fn=cmd_upload)
 
@@ -943,7 +978,7 @@ def main() -> int:
         "--no-upload", "--no-onedrive",
         dest="no_upload",
         action="store_true",
-        help="rclone remote 업로드를 생략",
+        help="rclone 원격 저장소 업로드를 생략",
     )
     auto.add_argument("--dry-run", action="store_true")
     auto.set_defaults(fn=cmd_automate)
@@ -1030,8 +1065,10 @@ def main() -> int:
 
     archive_only = sub.add_parser(
         "archive-videos", aliases=["archive-only"],
-        help="현재 학기의 접근 가능한 모든 VOD를 재생 없이 remote에 원본 보관",
+        help="선택한 학기의 접근 가능한 모든 VOD를 재생 없이 remote에 원본 보관",
     )
+    archive_only.add_argument("--year", help="대상 연도 (기본: 현재 학기)")
+    archive_only.add_argument("--semester", help="대상 학기 (기본: 현재 학기)")
     archive_only.add_argument("--course", nargs="*", type=int)
     archive_only.add_argument("--limit", type=int)
     archive_only.add_argument("--remote", default=DEFAULT_REMOTE)

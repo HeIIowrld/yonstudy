@@ -396,7 +396,7 @@ class Archiver:
         self.say(f"    자막 {a.title[:40]!r} [{lang}] {size//1024}KB")
 
     def _sync_submission(self, course, a, cdir, fetch_files) -> None:
-        """제출형 활동 아카이빙 — 모듈 종류에 관계없이 같은 테이블로 모은다."""
+        """제출형 활동을 모듈 종류에 관계없이 같은 테이블에 보관한다."""
         try:
             html = self._request(a.url, referer=course.url)
         except SessionExpired:
@@ -506,7 +506,7 @@ class Archiver:
         )
 
     def _sync_board(self, course, a, cdir, max_pages: int, fetch_files: bool) -> None:
-        """ubboard 게시판 — 목록을 페이지별로 훑고 새 글의 본문을 받는다.
+        """`ubboard` 목록을 페이지별로 훑고 새 글의 본문을 받는다.
 
         목록은 매번 다시 읽어 새 글과 메타데이터 변경을 찾는다. 실패했거나 변경된
         본문은 즉시 재시도하고, 오래된 본문도 주기적으로 다시 확인한다.
@@ -580,7 +580,7 @@ class Archiver:
             self.say(f"    [게시판] {a.title[:26]!r} 글 {total}건 (신규 {new_posts})")
 
     def _sync_forum(self, course, a, cdir, fetch_files: bool) -> None:
-        """forum — 토론 목록 → 각 토론의 모든 글."""
+        """`forum` 토론 목록을 읽고 각 토론의 모든 글을 받는다."""
         try:
             html = self._request(a.url, referer=course.url)
         except SessionExpired:
@@ -616,7 +616,7 @@ class Archiver:
                 if fetch_files:
                     for name, furl in post.attachments:
                         self._fetch_file(course, a, furl, name, "post", cdir, "boards")
-            # 토론 자체를 받았다는 표시 — 다음 실행에서 건너뛴다.
+            # 토론을 수집했다고 표시해 다음 실행에서 건너뛴다.
             self._save_post(
                 course, a, P.Post(post_id=f"t{thread_id}", subject=_title), "forum",
                 thread_id=thread_id,
@@ -846,7 +846,7 @@ class Archiver:
                 self.s.update_file_remote(url, role, relative, "error")
                 raise
             self.s.update_file_remote(url, role, relative, "ok")
-            action = "remote 저장" if uploaded else "remote에 이미 있음"
+            action = "원격 저장" if uploaded else "원격 저장소에 이미 있음"
             self.say(f"      {action} {safe} ({size//1024}KB)")
             return
         if len(body) > MAX_INLINE_FILE:

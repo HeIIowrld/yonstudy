@@ -27,7 +27,7 @@ _TJ = re.compile(rb"\((?:\\.|[^\\()])*\)")
 
 
 def _extract_pages_fallback(path: Path) -> list[str]:
-    """pypdf 없이 쓰는 최소 추출기 — 페이지 경계는 근사한다."""
+    """pypdf 없이 텍스트를 추출한다. 페이지 경계는 근삿값이다."""
     raw = path.read_bytes()
     pages: list[str] = []
     for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw, re.S):
@@ -47,7 +47,7 @@ def _extract_pages_fallback(path: Path) -> list[str]:
 
 
 def slide_candidates(store, cmid: int, limit: int = 12) -> list[tuple[Path, str]]:
-    """이 강의의 강의안일 수 있는 PDF 후보들.
+    """이 강의의 강의안일 수 있는 PDF 후보를 찾는다.
 
     제목 일치, 같은 주차, 같은 강좌 순으로 후보를 넓혀 간다. 실제 선택은 전사
     내용과의 일치도로 정한다.
@@ -82,7 +82,7 @@ def slide_candidates(store, cmid: int, limit: int = 12) -> list[tuple[Path, str]
 
 
 def find_slides_for(store, cmid: int) -> tuple[Path, str] | None:
-    """같은 제목, 같은 주차 순으로 PDF를 찾고 (blob 경로, 원본명)을 반환한다."""
+    """같은 제목, 같은 주차 순으로 PDF를 찾아 `(blob 경로, 원본명)`을 반환한다."""
     row = store.query(
         "SELECT title, course_id, section_idx FROM activity WHERE cmid=?", (cmid,)
     )

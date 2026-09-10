@@ -6,7 +6,7 @@ OnCalendar=*-*-* 02:30:00 Asia/Seoul
 OnCalendar=*-*-* 04:00:00 Asia/Seoul
 OnCalendar=*-*-* 05:30:00 Asia/Seoul
 Persistent=false
-RandomizedDelaySec=10m
+RandomizedDelaySec=45m
 AccuracySec=1m
 Unit=yonstudy-watch.service
 

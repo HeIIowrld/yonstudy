@@ -1,4 +1,4 @@
-"""현재 학기의 접근 가능한 모든 VOD 원본을 remote에 보관한다."""
+"""현재 학기에서 접근 가능한 모든 VOD 원본을 원격 저장소에 보관한다."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def archive_course_vods(
     course_ids: set[int] | None = None, limit: int | None = None,
     client=None, dry_run: bool = False, download_fn=V.download,
 ) -> VideoArchiveResult:
-    """접근 가능한 현재 학기 VOD를 임시 MP4로 받아 remote에 전송한다.
+    """현재 학기에서 접근 가능한 VOD를 임시 MP4로 받아 원격 저장소에 전송한다.
 
     성공 여부는 ``file(role='video')``에 남긴다. 성공한 원격 파일은 다음 실행에서
     크기까지 확인해 건너뛰며, 임시 로컬 파일은 성공/실패와 무관하게 제거한다.

@@ -27,7 +27,7 @@ _ATTR_RE = re.compile(r"""(\w[\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))""")
 
 
 def parse_input_tags(html: str) -> dict[str, str]:
-    """<input> 태그들의 id/name → value 매핑을 추출한다."""
+    """`<input>` 태그의 `id` 또는 `name`에 해당하는 `value`를 추출한다."""
     result: dict[str, str] = {}
     for tag in _INPUT_RE.findall(html):
         attrs: dict[str, str] = {}
@@ -125,7 +125,7 @@ class LearnUsClient:
     def _penalize(self) -> None:
         self._penalty += 1
         self.min_interval = min(self.max_interval, max(self.min_interval * 2, 1.0))
-        # 간격만 늘리지 말고 1분 당 상한도 함께 낮춘다.
+        # 간격만 늘리지 말고 분당 상한도 함께 낮춘다.
         self.per_minute = max(10, int(self.per_minute * 0.6))
 
     def _reward(self) -> None:
@@ -208,7 +208,7 @@ class LearnUsClient:
         return self._guard(go)
 
     def get_bytes(self, url: str, referer: str = LEARNUS) -> tuple[bytes, str]:
-        """(본문 바이트, 최종 URL). 첨부파일 다운로드용."""
+        """첨부 파일을 다운로드하고 본문 바이트와 최종 URL을 반환한다."""
         self._throttle()
         req = urllib.request.Request(
             url, headers={"User-Agent": UA, "Referer": referer}
@@ -320,7 +320,7 @@ class LearnUsClient:
         if not challenge or not key:
             raise RuntimeError("2단계 실패: ssoChallenge / RSA 공개키를 찾지 못했습니다")
 
-        # 자격증명을 암호화해 인증 결과를 받는다.
+        # 자격 증명을 암호화해 인증 결과를 받는다.
         e2 = rsa_pkcs1v15_encrypt_hex(
             key.group(1),
             key.group(2),
@@ -357,7 +357,7 @@ class LearnUsClient:
             raise RuntimeError(
                 "3단계 실패: 통합인증 거부"
                 + (f" ({reason})" if reason else "")
-                + ". 반복 시도하면 계정이 잠기니 자격증명을 먼저 확인하세요."
+                + ". 반복 시도하면 계정이 잠기니 자격 증명을 먼저 확인하세요."
             )
 
         # 인증 결과를 LearnUs에 넘겨 MoodleSession을 만든다.

@@ -1,4 +1,4 @@
-"""rclone remote에 강의 자료와 게시글을 저장한다."""
+"""rclone 원격 저장소에 강의 자료와 게시글을 저장한다."""
 
 from __future__ import annotations
 
@@ -250,7 +250,7 @@ class RcloneRemote:
 def sync_remote_tree(
     store, sink: RcloneRemote, *, year: str, semester: str
 ) -> RemoteSyncResult:
-    """DB에 있는 한 학기 자료와 글을 remote와 맞춘다."""
+    """DB에 있는 한 학기 자료와 글을 원격 저장소와 맞춘다."""
     result = RemoteSyncResult(destination=sink.remote)
     courses = store.query(
         """
@@ -314,7 +314,7 @@ def sync_remote_tree(
                 section_name=row["section_name"], open_from=row["open_from"],
                 saved_at=row["saved_at"],
             )
-            # 강의자료는 예전 `강의자료/ID_이름` 경로를 재사용하지 않고
+            # 강의 자료는 예전 `강의자료/ID_이름` 경로를 재사용하지 않고
             # 과목 루트의 주차 접두어 경로로 한 번만 이동한다.
             previous = row["remote_path"]
             if role == "resource" and previous and previous != desired:
