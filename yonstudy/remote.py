@@ -19,7 +19,13 @@ from .export import (
     render_course_index,
     term_folder,
 )
-from .flat_layout import canonical_filename, lesson_number, resource_filename, week_number
+from .flat_layout import (
+    canonical_filename,
+    lesson_number,
+    resource_filename,
+    video_filename,
+    week_number,
+)
 
 
 class RemoteStorageError(RuntimeError):
@@ -191,6 +197,39 @@ class RcloneRemote:
         listing[target] = moved_size
         return True
 
+    def move_media(self, source: str, target: str, *, size: int | None = None) -> bool:
+        """완성 자막이 있는 영상과 그 SRT/VTT를 새 파일명으로 함께 옮긴다."""
+        source = str(PurePosixPath(source))
+        target = str(PurePosixPath(target))
+        term = source.split("/", 1)[0]
+        listing = self._load_term(term)
+        source_path = PurePosixPath(source)
+        target_path = PurePosixPath(target)
+        source_prefix = f"{source_path.stem}."
+        sidecars = []
+        for relative, sidecar_size in listing.items():
+            sidecar = PurePosixPath(relative)
+            if sidecar.parent != source_path.parent:
+                continue
+            if not sidecar.name.startswith(source_prefix):
+                continue
+            if sidecar.suffix.casefold() not in {".srt", ".vtt"}:
+                continue
+            sidecars.append((relative, sidecar_size))
+        # 실행 중인 데스크톱 전사기가 잡고 있을 수 있으므로 자막 완성 전에는 이동하지 않는다.
+        if not sidecars:
+            return False
+        moved = self.move(source, target, size=size)
+        if not moved:
+            return False
+
+        for relative, sidecar_size in sidecars:
+            sidecar = PurePosixPath(relative)
+            remainder = sidecar.name[len(source_path.stem) :]
+            desired = str(target_path.with_name(f"{target_path.stem}{remainder}"))
+            self.move(relative, desired, size=sidecar_size)
+        return True
+
     def file_path(
         self, *, year: str, semester: str, course_slug: str,
         activity_title: str, file_id: int, name: str, role: str,
@@ -227,10 +266,7 @@ class RcloneRemote:
         """평면형 개인 아카이브 규칙에 맞는 강의영상 경로."""
         week = week_number(section_idx, section_name, title)
         lesson = lesson_number(title)
-        filename = canonical_filename(
-            week=week, lesson=lesson, kind="강의영상", title=title,
-            stable_id=f"cmid{cmid}", extension=".mp4",
-        )
+        filename = video_filename(week=week, lesson=lesson, title=title, cmid=cmid)
         return str(PurePosixPath(
             _safe(term_folder(year, semester)), _safe(course_slug), filename,
         ))

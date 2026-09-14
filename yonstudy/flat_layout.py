@@ -69,6 +69,21 @@ def canonical_filename(
     return f"{head}{middle}{tail}"
 
 
+def video_filename(*, week: int, lesson: int, title: str, cmid: int) -> str:
+    """사람이 훑어보기 쉬우면서 정렬·중복 방지가 되는 강의영상 파일명."""
+    position = []
+    if week:
+        position.append(f"{week:02d}주차")
+    if lesson:
+        position.append(f"{lesson:02d}차시")
+    prefix = " ".join(position) or "강의"
+    head = f"{prefix} - "
+    tail = f" ({int(cmid)}).mp4"
+    budget = MAX_FILENAME_BYTES - len((head + tail).encode("utf-8"))
+    middle = _truncate_utf8(_clean(title), budget) or "제목 없음"
+    return f"{head}{middle}{tail}"
+
+
 def resource_filename(
     *,
     section_idx: int | None,
@@ -226,9 +241,8 @@ def build_flat_plan(store, *, destination: str | Path, year: str, semester: str)
         for row in vods:
             week = week_number(row["section_idx"], row["section_name"], row["title"])
             lesson = lesson_number(row["title"])
-            name = canonical_filename(
-                week=week, lesson=lesson, kind="강의영상", title=row["title"],
-                stable_id=f"cmid{row['cmid']}", extension=".mp4",
+            name = video_filename(
+                week=week, lesson=lesson, title=row["title"], cmid=row["cmid"],
             )
             entries.append(
                 FlatEntry(

@@ -8,6 +8,7 @@ from yonstudy.flat_layout import (
     canonical_filename,
     lesson_number,
     resource_filename,
+    video_filename,
     week_number,
 )
 from yonstudy.store import Store
@@ -42,6 +43,18 @@ class FlatLayoutTests(unittest.TestCase):
         self.assertTrue(name.startswith("W01-L02__강의영상__"))
         self.assertTrue(name.endswith("__cmid4529931.mp4"))
         self.assertLessEqual(len(name.encode("utf-8")), MAX_FILENAME_BYTES)
+
+    def test_video_filename_is_readable_and_keeps_stable_id(self):
+        self.assertEqual(
+            video_filename(week=1, lesson=2, title="Week 1-2", cmid=4529931),
+            "01주차 02차시 - Week 1-2 (4529931).mp4",
+        )
+        self.assertEqual(
+            video_filename(
+                week=2, lesson=0, title="Week 2 Lecture Video", cmid=4549918
+            ),
+            "02주차 - Week 2 Lecture Video (4549918).mp4",
+        )
 
     def test_plan_keeps_only_term_and_course_directories(self):
         with tempfile.TemporaryDirectory() as temp:

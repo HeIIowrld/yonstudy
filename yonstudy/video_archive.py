@@ -17,6 +17,7 @@ class VideoArchiveResult:
     uploaded_files: int = 0
     uploaded_bytes: int = 0
     skipped_files: int = 0
+    moved_files: int = 0
     failed_files: int = 0
     failures: list[dict] = field(default_factory=list)
 
@@ -106,6 +107,28 @@ def archive_course_vods(
         stable_url = row["url"]
         existing = store.file_record(stable_url, "video")
         expected_size = existing["bytes"] if existing else None
+        previous = existing["remote_path"] if existing else None
+        if previous and previous != remote_path:
+            mover = getattr(sink, "move_media", None) or getattr(sink, "move", None)
+            if mover is not None:
+                try:
+                    if mover(previous, remote_path, size=expected_size):
+                        store.update_file_remote(stable_url, "video", remote_path, "ok")
+                        store.commit()
+                        result.moved_files += 1
+                        continue
+                except Exception as exc:
+                    store.log("video_archive", str(row["cmid"]), False, str(exc))
+                    store.commit()
+                    result.failed_files += 1
+                    result.failures.append({
+                        "cmid": row["cmid"], "title": row["title"],
+                        "error": f"기존 영상 이름 변경 실패: {str(exc)[:450]}",
+                    })
+                    continue
+                if sink.exists(previous, expected_size):
+                    result.skipped_files += 1
+                    continue
         if sink.exists(remote_path, expected_size):
             if not dry_run:
                 store.save_file({

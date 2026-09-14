@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from yonstudy.archive import Archiver
 from yonstudy.flat_layout import resource_filename
@@ -61,8 +62,60 @@ class DirectOneDriveArchiveTests(unittest.TestCase):
         self.assertEqual(
             path,
             "2026-2/CAS3116_컴퓨터비젼/"
-            "W01-L00__강의영상__Lec 1 - 9_1__cmid4538981.mp4",
+            "01주차 - Lec 1 - 9_1 (4538981).mp4",
         )
+
+    def test_video_move_also_renames_generated_subtitles(self):
+        sink = object.__new__(RcloneOneDrive)
+        old = "2026-2/TST/old-video.mp4"
+        new = "2026-2/TST/01주차 - 강의 (10).mp4"
+        sink._listings = {
+            "2026-2": {
+                old: 100,
+                "2026-2/TST/old-video.ko.srt": 20,
+                "2026-2/TST/old-video.en.vtt": 30,
+                "2026-2/TST/unrelated.txt": 5,
+            }
+        }
+        moves = []
+
+        def move(source, target, *, size=None):
+            moves.append((source, target, size))
+            listing = sink._listings["2026-2"]
+            if source not in listing:
+                return target in listing
+            listing[target] = listing.pop(source)
+            return True
+
+        sink.move = move
+
+        self.assertTrue(sink.move_media(old, new, size=100))
+        self.assertEqual(
+            moves,
+            [
+                (old, new, 100),
+                (
+                    "2026-2/TST/old-video.ko.srt",
+                    "2026-2/TST/01주차 - 강의 (10).ko.srt",
+                    20,
+                ),
+                (
+                    "2026-2/TST/old-video.en.vtt",
+                    "2026-2/TST/01주차 - 강의 (10).en.vtt",
+                    30,
+                ),
+            ],
+        )
+
+    def test_video_without_completed_subtitle_is_not_moved(self):
+        sink = object.__new__(RcloneOneDrive)
+        old = "2026-2/TST/old-video.mp4"
+        new = "2026-2/TST/01주차 - 강의 (10).mp4"
+        sink._listings = {"2026-2": {old: 100}}
+        sink.move = Mock()
+
+        self.assertFalse(sink.move_media(old, new, size=100))
+        sink.move.assert_not_called()
 
     def test_file_goes_to_sink_without_local_blob_or_course_copy(self):
         with tempfile.TemporaryDirectory() as root:
