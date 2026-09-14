@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).parents[1] / "desktop" / "강의_자막_생성.py"
@@ -24,6 +25,82 @@ class DesktopTranscriberTests(unittest.TestCase):
     def test_defaults_to_quantized_medium_with_automatic_language_detection(self):
         self.assertEqual(desktop.MODEL, "medium-q5_0")
         self.assertEqual(desktop.LANGUAGE, "auto")
+
+    def test_runtime_python_uses_real_redirected_path(self):
+        runtime = Path("C:/Users/test/AppData/Local/yonstudy-transcriber")
+        actual = Path("C:/Users/test/AppData/Local/Packages/Python/LocalCache/python.exe")
+        with (
+            patch.object(desktop.sys, "platform", "win32"),
+            patch.object(desktop.os.path, "realpath", return_value=str(actual)) as realpath,
+        ):
+            result = desktop.runtime_python(runtime)
+
+        self.assertEqual(result, actual)
+        requested = str(realpath.call_args.args[0]).replace("\\", "/")
+        self.assertTrue(requested.endswith("/venv/Scripts/python.exe"))
+
+    def test_runtime_layout_requires_pyvenv_cfg(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            root = Path(root_name)
+            python = root / "venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+
+            self.assertFalse(desktop._runtime_layout_valid(python))
+            (python.parent.parent / "pyvenv.cfg").write_text("home=x\n", encoding="utf-8")
+            self.assertTrue(desktop._runtime_layout_valid(python))
+
+    def test_damaged_runtime_is_recreated_and_actual_path_rechecked(self):
+        runtime = Path("runtime")
+        damaged = Path("redirected/old/bin/python")
+        repaired = Path("redirected/new/bin/python")
+        builder = Mock()
+        with (
+            patch.object(desktop, "runtime_python", side_effect=[damaged, repaired]),
+            patch.object(desktop, "_python_runtime_valid", side_effect=[False, True]),
+            patch.object(desktop.venv, "EnvBuilder", return_value=builder) as env_builder,
+            patch.object(desktop.Path, "exists", return_value=True),
+            patch.object(desktop.Path, "mkdir"),
+        ):
+            result = desktop.ensure_python_runtime(runtime)
+
+        self.assertEqual(result, repaired)
+        env_builder.assert_called_once_with(with_pip=True, clear=True)
+        builder.create.assert_called_once_with(runtime / "venv")
+
+    def test_valid_runtime_is_reused(self):
+        runtime = Path("runtime")
+        python = Path("redirected/venv/bin/python")
+        with (
+            patch.object(desktop, "runtime_python", return_value=python),
+            patch.object(desktop, "_python_runtime_valid", return_value=True),
+            patch.object(desktop.venv, "EnvBuilder") as env_builder,
+        ):
+            result = desktop.ensure_python_runtime(runtime)
+
+        self.assertEqual(result, python)
+        env_builder.assert_not_called()
+
+    def test_semester_lock_rejects_second_process(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            root = Path(root_name)
+            runtime = root / "runtime"
+            semester = root / "2026-2"
+            semester.mkdir()
+
+            with desktop.semester_lock(runtime, semester):
+                with self.assertRaises(desktop.AlreadyRunningError):
+                    with desktop.semester_lock(runtime, semester):
+                        pass
+
+    def test_session_log_mirrors_output(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            runtime = Path(root_name)
+            with desktop.session_log(runtime) as path:
+                print("진단 메시지")
+
+            self.assertIsNotNone(path)
+            self.assertIn("진단 메시지", path.read_text(encoding="utf-8"))
 
     def test_backend_order_prefers_cuda_then_vulkan_then_cpu(self):
         self.assertEqual(

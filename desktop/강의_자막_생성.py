@@ -9,6 +9,7 @@ Windows x64 데스크톱에서 파일을 더블클릭하는 사용 방식을 기
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import hashlib
 import json
@@ -24,8 +25,9 @@ import urllib.request
 import venv
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import IO, Iterable, Iterator, TextIO
 
 
 # medium 구조를 유지하면서 범용 GPU의 메모리 부담을 낮춘 공식 양자화 모델이다.
@@ -33,6 +35,7 @@ MODEL = "medium-q5_0"
 LANGUAGE = "auto"
 BEAM_SIZE = 5
 STABLE_SECONDS = 120
+SCRIPT_VERSION = "2026.09.14.1"
 IMAGEIO_FFMPEG_VERSION = "0.6.0"
 WHISPER_CPP_VERSION = "1.8.7"
 RUNTIME_RELEASE = "desktop-runtime-v1.8.7-1"
@@ -128,6 +131,33 @@ class BackendError(RuntimeError):
     """선택한 whisper.cpp 백엔드를 초기화하거나 실행하지 못했다."""
 
 
+class AlreadyRunningError(RuntimeError):
+    """같은 학기 폴더의 자막 생성기가 이미 실행 중이다."""
+
+
+class _Tee:
+    """콘솔 출력을 유지하면서 진단 로그에도 같은 내용을 쓴다."""
+
+    def __init__(self, console: TextIO, log: TextIO) -> None:
+        self.console = console
+        self.log = log
+
+    def write(self, value: str) -> int:
+        written = self.console.write(value)
+        self.log.write(value)
+        return written
+
+    def flush(self) -> None:
+        self.console.flush()
+        self.log.flush()
+
+    def isatty(self) -> bool:
+        return self.console.isatty()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.console, name)
+
+
 def app_data_dir() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
@@ -140,8 +170,142 @@ def app_data_dir() -> Path:
 
 def runtime_python(runtime: Path) -> Path:
     if sys.platform == "win32":
-        return runtime / "venv" / "Scripts" / "python.exe"
-    return runtime / "venv" / "bin" / "python"
+        requested = runtime / "venv" / "Scripts" / "python.exe"
+    else:
+        requested = runtime / "venv" / "bin" / "python"
+    # Store Python의 파일 리디렉션은 CreateProcess에 적용되지 않으므로 실제 경로가 필요하다.
+    return Path(os.path.realpath(requested))
+
+
+def _runtime_layout_valid(python: Path) -> bool:
+    return python.is_file() and (python.parent.parent / "pyvenv.cfg").is_file()
+
+
+def _command_succeeds(command: list[str]) -> bool:
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _python_runtime_valid(python: Path) -> bool:
+    if not _runtime_layout_valid(python):
+        return False
+    return _command_succeeds([str(python), "-c", "import sys"]) and _command_succeeds(
+        [str(python), "-m", "pip", "--version"]
+    )
+
+
+def ensure_python_runtime(runtime: Path) -> Path:
+    """리디렉션을 반영한 정상 venv를 반환하고 손상된 venv는 복구한다."""
+    requested = runtime / "venv"
+    python = runtime_python(runtime)
+    if _python_runtime_valid(python):
+        return python
+
+    first_install = not requested.exists() and not python.exists()
+    if first_install:
+        print("처음 실행입니다. 사용자 전용 미디어 환경을 준비합니다.", flush=True)
+    else:
+        print("사용자 전용 미디어 환경이 손상되어 복구합니다.", flush=True)
+    runtime.mkdir(parents=True, exist_ok=True)
+    venv.EnvBuilder(with_pip=True, clear=True).create(requested)
+
+    # EnvBuilder가 표시하는 Actual location과 같은 경로를 생성 후 다시 계산한다.
+    python = runtime_python(runtime)
+    if not _python_runtime_valid(python):
+        raise RuntimeError("사용자 전용 미디어 환경을 만들지 못했습니다.")
+    return python
+
+
+def _lock_file(file: IO[str]) -> None:
+    file.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(file: IO[str]) -> None:
+    file.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def semester_lock(runtime: Path, root: Path) -> Iterator[None]:
+    """같은 학기 폴더에 대한 자막 생성기를 한 번만 실행한다."""
+    identity = hashlib.sha256(str(root.resolve()).casefold().encode("utf-8")).hexdigest()
+    lock_dir = runtime / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    path = lock_dir / f"{identity}.lock"
+    with path.open("a+", encoding="utf-8") as file:
+        file.seek(0, os.SEEK_END)
+        if file.tell() == 0:
+            file.write("0")
+            file.flush()
+        try:
+            _lock_file(file)
+        except OSError as exc:
+            raise AlreadyRunningError(
+                "이 학기 폴더의 자막 생성기가 이미 실행 중입니다. "
+                "기존 창이 끝난 뒤 다시 실행하세요."
+            ) from exc
+        try:
+            file.seek(0)
+            file.truncate()
+            file.write(f"pid={os.getpid()}\nroot={root}\n")
+            file.flush()
+            yield
+        finally:
+            _unlock_file(file)
+
+
+@contextlib.contextmanager
+def session_log(runtime: Path) -> Iterator[Path | None]:
+    """화면 출력을 AppData 로그에도 기록한다. 로그 실패는 실행을 막지 않는다."""
+    try:
+        directory = runtime / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = directory / f"transcriber-{stamp}-{os.getpid()}.log"
+    except OSError:
+        yield None
+        return
+
+    try:
+        log = path.open("w", encoding="utf-8", newline="\n")
+    except OSError:
+        yield None
+        return
+
+    with log:
+        with contextlib.redirect_stdout(_Tee(sys.stdout, log)), contextlib.redirect_stderr(
+            _Tee(sys.stderr, log)
+        ):
+            yield path
+    try:
+        logs = sorted(directory.glob("transcriber-*.log"), key=lambda item: item.name)
+        for old in logs[:-20]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def media_decoder_available() -> bool:
@@ -156,11 +320,7 @@ def media_decoder_available() -> bool:
 def bootstrap_python_runtime(args: list[str]) -> int:
     """영상 디코더가 없으면 사용자 전용 venv를 만들고 다시 실행한다."""
     runtime = app_data_dir()
-    python = runtime_python(runtime)
-    if not python.is_file():
-        print("처음 실행입니다. 사용자 전용 미디어 환경을 준비합니다.", flush=True)
-        runtime.mkdir(parents=True, exist_ok=True)
-        venv.EnvBuilder(with_pip=True).create(runtime / "venv")
+    python = ensure_python_runtime(runtime)
     check = subprocess.run(
         [
             str(python),
@@ -176,7 +336,7 @@ def bootstrap_python_runtime(args: list[str]) -> int:
     )
     if check.returncode != 0:
         print("영상 음성을 읽을 FFmpeg 번들을 설치합니다.", flush=True)
-        subprocess.check_call(
+        result = subprocess.run(
             [
                 str(python),
                 "-m",
@@ -184,8 +344,22 @@ def bootstrap_python_runtime(args: list[str]) -> int:
                 "install",
                 "--disable-pip-version-check",
                 f"imageio-ffmpeg=={IMAGEIO_FFMPEG_VERSION}",
-            ]
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
+        detail = result.stdout.strip()
+        if detail:
+            print(detail, flush=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"FFmpeg 번들을 설치하지 못했습니다(종료 코드 {result.returncode}). "
+                f"{detail[-2000:]}"
+            )
     command = [str(python), str(Path(__file__).resolve()), *args, "--_runtime"]
     return subprocess.call(command)
 
@@ -645,6 +819,7 @@ def run(args: argparse.Namespace) -> int:
     if args.limit is not None:
         candidates = candidates[: max(0, args.limit)]
 
+    print(f"강의 자막 생성기: {SCRIPT_VERSION}")
     print(f"학기 폴더: {root}")
     print(f"모델: {MODEL} (medium 양자화) · 언어: 강의별 자동 감지")
     print(
@@ -660,13 +835,27 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     _check_platform()
-    if not media_decoder_available():
-        if args._runtime:
-            raise RuntimeError("전용 환경에 FFmpeg 번들을 설치하지 못했습니다.")
-        forwarded = [arg for arg in sys.argv[1:] if arg not in {"--pause", "--_runtime"}]
-        return bootstrap_python_runtime(forwarded)
-
     runtime = app_data_dir()
+    if args._runtime:
+        if not media_decoder_available():
+            raise RuntimeError("전용 환경에 FFmpeg 번들을 설치하지 못했습니다.")
+        return _process_candidates(args, root, candidates, runtime)
+
+    with semester_lock(runtime, root):
+        if not media_decoder_available():
+            forwarded = [
+                arg for arg in sys.argv[1:] if arg not in {"--pause", "--_runtime"}
+            ]
+            return bootstrap_python_runtime(forwarded)
+        return _process_candidates(args, root, candidates, runtime)
+
+
+def _process_candidates(
+    args: argparse.Namespace,
+    root: Path,
+    candidates: list[Candidate],
+    runtime: Path,
+) -> int:
     model, vad_model = ensure_models(runtime)
     names = backend_order(args.backend)
     print("음성 인식 순서: " + " → ".join(BACKEND_LABELS[name] for name in names))
@@ -738,20 +927,24 @@ def main() -> int:
     double_clicked = len(sys.argv) == 1
     args = parser().parse_args()
     args.pause = args.pause or double_clicked
-    try:
-        return run(args)
-    except KeyboardInterrupt:
-        print("\n사용자가 중단했습니다.")
-        return 130
-    except Exception as exc:
-        print(f"\n실행 실패: {exc}")
-        return 1
-    finally:
-        if args.pause:
-            try:
-                input("\n창을 닫으려면 Enter 키를 누르세요...")
-            except (EOFError, KeyboardInterrupt):
-                pass
+    with session_log(app_data_dir()) as log_path:
+        try:
+            result = run(args)
+        except KeyboardInterrupt:
+            print("\n사용자가 중단했습니다.")
+            result = 130
+        except Exception as exc:
+            print(f"\n실행 실패: {exc}")
+            result = 1
+        finally:
+            if log_path is not None:
+                print(f"\n실행 로그: {log_path}")
+            if args.pause:
+                try:
+                    input("\n창을 닫으려면 Enter 키를 누르세요...")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+        return result
 
 
 if __name__ == "__main__":

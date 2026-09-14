@@ -425,6 +425,11 @@ Windows 데스크톱에서 가장 간단하게 쓰려면
 감지하여 한국어는 `.ko.srt`, 영어는 `.en.srt`로 저장한다. Python 3.10 이상이 Windows x64
 데스크톱에 설치되어 있어야 한다.
 
+Microsoft Store Python이 가상환경을 `LocalCache` 아래로 리디렉션해도 실제 실행 경로를
+자동으로 사용한다. 가상환경 설정이나 pip가 손상된 경우에는 해당 환경만 다시 만든다.
+같은 학기 폴더에서 생성기를 두 번 실행하면 두 번째 실행은 작업 중복을 막기 위해 종료된다.
+화면 출력은 `%LOCALAPPDATA%/yonstudy-transcriber/logs`에도 저장하며 최근 20개를 보관한다.
+
 장치는 `CUDA → Vulkan → CPU` 순서로 자동 선택한다. NVIDIA 드라이버가 있으면 CUDA를
 먼저 사용하고, CUDA가 없거나 실행에 실패하면 AMD, Intel, NVIDIA GPU에서 사용할 수 있는
 Vulkan을 시도한다. Vulkan도 사용할 수 없으면 CPU로 같은 파일을 다시 처리한다. 백엔드가
