@@ -35,7 +35,7 @@ MODEL = "medium-q5_0"
 LANGUAGE = "auto"
 BEAM_SIZE = 5
 STABLE_SECONDS = 120
-SCRIPT_VERSION = "2026.09.14.1"
+SCRIPT_VERSION = "2026.09.15.1"
 IMAGEIO_FFMPEG_VERSION = "0.6.0"
 WHISPER_CPP_VERSION = "1.8.7"
 RUNTIME_RELEASE = "desktop-runtime-v1.8.7-1"
@@ -542,13 +542,38 @@ def _safe_extract(archive: Path, destination: Path) -> None:
         source.extractall(destination)
 
 
+def _runtime_required_files(name: str) -> set[str]:
+    required = {
+        "whisper-cli.exe",
+        "whisper.dll",
+        "ggml.dll",
+        "ggml-base.dll",
+        "ggml-cpu.dll",
+    }
+    if name.startswith("cuda"):
+        required.add("ggml-cuda.dll")
+    elif name.startswith("vulkan"):
+        required.add("ggml-vulkan.dll")
+    return required
+
+
+def _runtime_missing_files(target: Path, name: str) -> list[str]:
+    return sorted(
+        filename
+        for filename in _runtime_required_files(name)
+        if not (target / filename).is_file()
+    )
+
+
 def install_runtime(runtime: Path, spec: ArchiveSpec) -> Path:
     target = runtime / "runtimes" / spec.name
     marker = target / ".archive.sha256"
-    executables = sorted(target.rglob("whisper-cli.exe")) if target.is_dir() else []
-    if executables and marker.is_file():
-        if marker.read_text(encoding="ascii").strip() == spec.sha256:
-            return executables[0]
+    if target.is_dir() and marker.is_file():
+        if (
+            marker.read_text(encoding="ascii").strip() == spec.sha256
+            and not _runtime_missing_files(target, spec.name)
+        ):
+            return target / "whisper-cli.exe"
 
     archive = download(
         spec.url,
@@ -573,6 +598,12 @@ def install_runtime(runtime: Path, spec: ArchiveSpec) -> Path:
         if target.exists():
             shutil.rmtree(target)
         ready.replace(target)
+        missing = _runtime_missing_files(target, spec.name)
+        if missing:
+            raise RuntimeError(
+                f"{spec.filename} 설치 후 필수 파일이 없습니다: {', '.join(missing)}. "
+                "Windows 보안의 보호 기록에서 차단 여부를 확인하세요."
+            )
         return target / "whisper-cli.exe"
     finally:
         for temporary in (staging, ready):

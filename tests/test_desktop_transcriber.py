@@ -192,6 +192,31 @@ class DesktopTranscriberTests(unittest.TestCase):
 
             self.assertFalse((root / "outside.exe").exists())
 
+    def test_incomplete_cached_runtime_is_reinstalled_with_required_dlls(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            runtime = Path(root_name)
+            target = runtime / "runtimes" / "cpu-test"
+            target.mkdir(parents=True)
+            (target / "whisper-cli.exe").write_bytes(b"stale executable")
+            checksum = "a" * 64
+            (target / ".archive.sha256").write_text(checksum + "\n", encoding="ascii")
+
+            archive = runtime / "fresh.zip"
+            required = desktop._runtime_required_files("cpu-test")
+            with zipfile.ZipFile(archive, "w") as output:
+                for filename in required:
+                    output.writestr(f"Release/{filename}", filename.encode())
+            spec = desktop.ArchiveSpec(
+                "cpu-test", "fresh.zip", "https://example.test/fresh.zip", checksum
+            )
+
+            with patch.object(desktop, "download", return_value=archive):
+                executable = desktop.install_runtime(runtime, spec)
+
+            self.assertEqual(executable, target / "whisper-cli.exe")
+            self.assertEqual(desktop._runtime_missing_files(target, spec.name), [])
+            self.assertEqual(executable.read_bytes(), b"whisper-cli.exe")
+
 
 if __name__ == "__main__":
     unittest.main()
