@@ -54,6 +54,9 @@ class Course:
 
 
 _COURSE_TITLE = re.compile(r"^(.*?)\s*\(([A-Za-z0-9]+)\.(\d+)-(\d+)\)$")
+_COURSE_TERM_PREFIX = re.compile(
+    r"^\[(\d{4})\s*-\s*(1학기|2학기|여름계절수업|겨울계절수업)\]\s*(.*)$"
+)
 
 
 def _course_list_body(page: str) -> str | None:
@@ -113,6 +116,50 @@ def parse_course_list(page: str) -> list[Course]:
             )
         )
     return courses
+
+
+def parse_direct_course(page: str, course_id: int) -> Course:
+    """강좌 목록에 숨겨진 강좌의 상세 페이지에서 최소 메타데이터를 만든다."""
+    header = None
+    prof = re.search(
+        r"\bclass\s*=\s*(['\"])[^'\"]*\bcoursename\b[^'\"]*\1[^>]*>(.*?)</",
+        page,
+        re.S | re.I,
+    )
+    if prof:
+        header = text(prof.group(2))
+    if not header:
+        title_tag = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
+        header = text(title_tag.group(1)) if title_tag else ""
+        header = re.sub(r"^강좌\s*:\s*", "", header)
+
+    term = _COURSE_TERM_PREFIX.match(header)
+    if not term:
+        raise ValueError(
+            f"고정 등록 강좌 {course_id}의 연도/학기를 제목에서 확인하지 못했습니다: "
+            f"{header or '(제목 없음)'}"
+        )
+
+    year, semester, title = term.groups()
+    title = title.strip()
+    regular = _COURSE_TITLE.match(title)
+    if regular:
+        name, code, section = regular.group(1), regular.group(2), regular.group(3)
+    else:
+        suffix = re.match(r"^(.*?)\s*\(([^()]+)\)$", title)
+        name = suffix.group(1).strip() if suffix else title
+        code = suffix.group(2).strip() if suffix else None
+        section = None
+    return Course(
+        course_id=course_id,
+        year=year,
+        semester=semester,
+        kind="고정등록",
+        title=title,
+        name=name,
+        code=code,
+        section=section,
+    )
 
 
 def find_activity_ids(page: str) -> set[int]:

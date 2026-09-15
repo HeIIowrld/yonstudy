@@ -158,6 +158,14 @@ python cli.py archive --year 2026 --no-vod --no-subtitles --no-files
 
 같은 명령을 다시 실행하면 저장된 항목을 확인한 뒤 새 항목과 변경된 항목만 처리한다.
 
+LearnUs 전체 강좌 목록에는 없지만 직접 접근 가능한 특수·비교과 강좌는 환경 변수로
+고정 등록할 수 있다. 여러 ID는 쉼표나 공백으로 구분한다.
+
+```bash
+export YONSTUDY_EXTRA_COURSE_IDS='303762,303999'
+python cli.py archive
+```
+
 ### macOS 한글 파일명 복구
 
 새로 수집하거나 내보내는 파일명은 한글 자모가 분리되지 않도록 NFC 조합형으로

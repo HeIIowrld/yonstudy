@@ -23,6 +23,27 @@ POST_REFRESH_AFTER = timedelta(days=7)
 FORUM_REFRESH_AFTER = timedelta(days=1)
 
 
+def _configured_course_ids() -> set[int]:
+    """강좌 목록에 표시되지 않는 특수 강좌 ID를 환경 변수에서 읽는다."""
+    raw = os.environ.get("YONSTUDY_EXTRA_COURSE_IDS", "")
+    if not raw.strip():
+        return set()
+    values: set[int] = set()
+    for token in re.split(r"[\s,]+", raw.strip()):
+        try:
+            course_id = int(token)
+        except ValueError as exc:
+            raise ValueError(
+                f"YONSTUDY_EXTRA_COURSE_IDS의 강좌 ID가 올바르지 않습니다: {token}"
+            ) from exc
+        if course_id <= 0:
+            raise ValueError(
+                f"YONSTUDY_EXTRA_COURSE_IDS의 강좌 ID는 양수여야 합니다: {token}"
+            )
+        values.add(course_id)
+    return values
+
+
 def _activity_week(a) -> str:
     """진도표의 주차 값과 비교할 활동 주차를 정규화한다."""
     section_name = getattr(a, "section_name", "") or ""
@@ -98,12 +119,17 @@ def _is_login_response(body: str, final_url: str = "") -> bool:
 class Archiver:
     def __init__(
         self, client: LearnUsClient, store: Store, verbose: bool = True,
-        file_sink=None,
+        file_sink=None, extra_course_ids: set[int] | None = None,
     ):
         self.c = client
         self.s = store
         self.verbose = verbose
         self.file_sink = file_sink
+        self.extra_course_ids = (
+            _configured_course_ids()
+            if extra_course_ids is None
+            else set(extra_course_ids)
+        )
         self._user_id: str | None = None
 
     def _request(self, url: str, **kwargs) -> str:
@@ -150,6 +176,20 @@ class Archiver:
         courses = P.parse_course_list(page)
         if not courses and self.s.query("SELECT 1 FROM course LIMIT 1"):
             raise RuntimeError("기존 강좌가 있지만 새 강좌 목록이 비어 있어 동기화를 중단합니다")
+        listed_ids = {course.course_id for course in courses}
+        for course_id in sorted(self.extra_course_ids - listed_ids):
+            try:
+                detail = self._request(
+                    f"{LEARNUS}/course/view.php?id={course_id}"
+                )
+                courses.append(P.parse_direct_course(detail, course_id))
+            except SessionExpired:
+                raise
+            except Exception as exc:
+                self.s.log(
+                    "course", str(course_id), False,
+                    f"고정 등록 강좌 확인 실패: {exc}",
+                )
         synced_at = _now()
         for course in courses:
             row = asdict(course)
@@ -161,7 +201,8 @@ class Archiver:
             )
             self.s.save_course(row)
         self.s.reconcile_enrollment(
-            {course.course_id for course in courses}, synced_at=synced_at
+            {course.course_id for course in courses} | self.extra_course_ids,
+            synced_at=synced_at,
         )
         self.s.commit()
         self.s.prune_monitor_state()

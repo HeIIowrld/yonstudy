@@ -4,8 +4,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from yonstudy.archive import Archiver, SessionExpired, _match_progress_rows
-from yonstudy.parse import Activity, Course, Post, ProgressRow
+from yonstudy.archive import (
+    Archiver, SessionExpired, _configured_course_ids, _match_progress_rows,
+)
+from yonstudy.parse import Activity, Course, Post, ProgressRow, parse_direct_course
 from yonstudy.store import Store
 
 
@@ -186,6 +188,56 @@ class CourseEnrollmentSyncTests(unittest.TestCase):
             self.assertEqual(state["attendance"], [])
             self.assertEqual(state["new_videos"], [])
             self.assertIn("roster_reconciled_at", state)
+
+    def test_configured_hidden_course_is_fetched_and_kept_enrolled(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            client = MagicMock()
+            client.request.side_effect = [
+                self.course_list(1),
+                """
+                <h1 class="coursename">
+                  [2026-2학기] 오프라인 튜터링 프로그램 (learnus-102)
+                </h1>
+                """,
+            ]
+            archiver = Archiver(
+                client, store, verbose=False, extra_course_ids={303762}
+            )
+
+            courses = archiver.sync_courses()
+
+            self.assertEqual([course.course_id for course in courses], [1, 303762])
+            hidden = dict(store.query(
+                "SELECT * FROM course WHERE course_id=303762"
+            )[0])
+            self.assertEqual(hidden["year"], "2026")
+            self.assertEqual(hidden["semester"], "2학기")
+            self.assertEqual(hidden["name"], "오프라인 튜터링 프로그램")
+            self.assertEqual(hidden["enrolled"], 1)
+
+
+class ConfiguredCourseTests(unittest.TestCase):
+    def test_course_ids_accept_commas_spaces_and_duplicates(self):
+        with patch.dict(
+            "os.environ", {"YONSTUDY_EXTRA_COURSE_IDS": "303762, 303999 303762"}
+        ):
+            self.assertEqual(_configured_course_ids(), {303762, 303999})
+
+    def test_direct_course_metadata_comes_from_heading(self):
+        course = parse_direct_course(
+            """
+            <title>강좌: fallback</title>
+            <div class="page-header-headings coursename extra">
+              [2026-2학기] 오프라인 튜터링 프로그램 (learnus-102)
+            </div>
+            """,
+            303762,
+        )
+        self.assertEqual(course.year, "2026")
+        self.assertEqual(course.semester, "2학기")
+        self.assertEqual(course.name, "오프라인 튜터링 프로그램")
+        self.assertEqual(course.code, "learnus-102")
 
 
 class ActivityPresenceSyncTests(unittest.TestCase):
