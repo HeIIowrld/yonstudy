@@ -241,6 +241,35 @@ class ConfiguredCourseTests(unittest.TestCase):
 
 
 class ActivityPresenceSyncTests(unittest.TestCase):
+    def test_assignment_refresh_skips_video_and_board_requests(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            archiver = Archiver(MagicMock(), store, verbose=False)
+            page = '''<li id="module-10" class="activity modtype_assign">
+                <a href="/mod/assign/view.php?id=10"><span class="instancename">HW</span></a></li>'''
+            def refresh(course, activity, cdir, fetch_files):
+                from yonstudy.store import _now
+                self.assertFalse(fetch_files)
+                store.save_submission({"cmid": 10, "course_id": 1, "submitted": 1, "seen_at": _now()})
+            with patch.object(archiver, "_fetch_course_page", return_value=page), \
+                 patch.object(archiver, "_sync_submission", side_effect=refresh), \
+                 patch.object(archiver, "_request") as request:
+                archiver.sync_course(self.course(), assignments_only=True)
+                request.assert_not_called()
+
+    def test_assignment_refresh_detects_silently_failed_submission_fetch(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_submission({"cmid": 10, "course_id": 1, "submitted": 0,
+                                   "status": "미제출", "seen_at": "2020-01-01T00:00:00"})
+            archiver = Archiver(MagicMock(), store, verbose=False)
+            page = '''<li id="module-10" class="activity modtype_assign">
+                <span class="instancename">HW</span></li>'''
+            with patch.object(archiver, "_fetch_course_page", return_value=page), \
+                 patch.object(archiver, "_sync_submission"):
+                with self.assertRaisesRegex(RuntimeError, "제출 상태"):
+                    archiver.sync_course(self.course(), assignments_only=True)
+
     @staticmethod
     def course() -> Course:
         return Course(1, "2026", "2학기", "교과", "테스트 (TST1000.01-00)",

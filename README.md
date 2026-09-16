@@ -189,6 +189,21 @@ python cli.py normalize-names "D:\LearnUs"
 
 ## 리포트
 
+09:00 메일은 과제 제출 상태를 다시 조회하고 **오늘 마감 과제**를 제출 여부와 함께
+표시한다. 매일 **22:00 한국 시간**에 한 번 더 조회하여 오늘 마감인 미제출 과제가
+있을 때만 추가 메일을 보낸다. 모두 제출했거나 오늘 마감 과제가 없으면 보내지 않는다.
+당일 마감 시간이 이미 지난 미제출 과제도 포함한다. 같은 날 발송 성공 후 재실행하면
+중복 발송하지 않는다. 외부 LTI처럼 마감·제출 상태를 확인할 수 없는 항목은 미제출로
+단정하지 않으며, 조회 실패는 `store/deadline_reminder_state.json`과 로그에 남긴다.
+
+```bash
+python cli.py deadline-reminder --dry-run  # 실시간 조회·DB 갱신, 메일 발송 안 함
+python cli.py deadline-reminder            # 미제출이 있을 때만 발송
+```
+
+Docker에는 22시 예약이 기본 포함된다. systemd 배포에서는
+`sudo systemctl enable --now yonstudy-deadline-reminder.timer`로 켠다.
+
 `report`는 오늘 공개된 자료, 새 게시글, 제출 완료 상태, 남은 과제와 미수강 영상을
 현재 학기 기준으로 정리한다. 매일 보내는 메일은 과목별 수강률, 현재 남은 항목,
 14일 이내 공개 예정 항목과 오늘의 변경 사항만 간결하게 표시한다. 학기 전체 강의와

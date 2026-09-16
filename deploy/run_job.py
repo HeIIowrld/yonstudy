@@ -29,7 +29,8 @@ JOBS: dict[str, tuple[list[str], bool]] = {
     "monitor": (["monitor"], False),
     "watch": (["scheduled-watch", "--limit", "1"], False),
     "daily": (["automate", "--no-mail"], False),
-    "report": (["report", "--sync-if-stale", "--email-if-configured"], True),
+    "report": (["report", "--sync-if-stale", "--refresh-assignments", "--email-if-configured"], True),
+    "deadline-reminder": (["deadline-reminder"], True),
 }
 
 

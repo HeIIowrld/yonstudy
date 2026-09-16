@@ -19,3 +19,4 @@ YONSTUDY_BROWSER_CHANNEL=chrome
 # Archive materials every six hours. The 06:10 run prepares the 09:00 report.
 10 */6 * * * root /app/deploy/run-job.sh daily
 0 9 * * * root /app/deploy/run-job.sh report
+0 22 * * * root /app/deploy/run-job.sh deadline-reminder

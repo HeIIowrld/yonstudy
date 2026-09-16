@@ -1,0 +1,11 @@
+[Unit]
+Description=Recheck assignment submissions at 22:00 KST
+
+[Timer]
+OnCalendar=*-*-* 22:00:00 Asia/Seoul
+Persistent=false
+AccuracySec=1m
+Unit=yonstudy-deadline-reminder.service
+
+[Install]
+WantedBy=timers.target

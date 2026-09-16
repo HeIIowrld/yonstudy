@@ -400,6 +400,16 @@ def cmd_report(args) -> int:
             )
         store.commit()
 
+    assignment_errors = []
+    if getattr(args, "refresh_assignments", False):
+        from yonstudy.deadline_reminder import refresh_assignments
+
+        assignment_errors = refresh_assignments(
+            store, get_client(args), year=year, semester=semester,
+        )
+        if assignment_errors:
+            print("제출 상태 일부 확인 실패:", assignment_errors, file=sys.stderr)
+
     report = build_daily_report(
         store,
         target=target,
@@ -407,6 +417,8 @@ def cmd_report(args) -> int:
         semester=semester,
         horizon_days=args.days,
     )
+    if assignment_errors:
+        report.stale = True
     body = report_as_json(report) if args.json else render_report(report)
     print(body, end="")
     if args.output:
@@ -432,6 +444,16 @@ def cmd_report(args) -> int:
         )
         print(f"리포트 메일 전송 요청 완료: {recipient}")
     return 0
+
+
+def cmd_deadline_reminder(args) -> int:
+    from yonstudy.deadline_reminder import run_deadline_reminder
+
+    code, state = run_deadline_reminder(
+        store_path=args.store, cookie_path=args.cookies, dry_run=args.dry_run,
+    )
+    print(json.dumps(state, ensure_ascii=False, indent=2))
+    return code
 
 
 def cmd_export(args) -> int:
@@ -930,6 +952,8 @@ def main() -> int:
     w.set_defaults(fn=cmd_watch)
 
     rep = sub.add_parser("report", help="이번 학기 진도/제출 + 오늘 업데이트 리포트")
+    rep.add_argument("--refresh-assignments", action="store_true",
+                     help="메일 작성 직전 과제 마감·제출 상태를 실시간 갱신")
     rep.add_argument("--sync", action="store_true", help="현재 학기를 먼저 가볍게 동기화")
     rep.add_argument(
         "--sync-if-stale",
@@ -949,6 +973,11 @@ def main() -> int:
     rep.add_argument("--output", help="텍스트/JSON 리포트 저장 경로")
     rep.add_argument("--json", action="store_true")
     rep.set_defaults(fn=cmd_report)
+
+    reminder = sub.add_parser("deadline-reminder", help="오늘 마감 미제출 과제 재확인 및 추가 메일")
+    reminder.add_argument("--dry-run", action="store_true",
+                          help="실시간 조회와 DB 갱신만 수행하고 메일은 보내지 않음")
+    reminder.set_defaults(fn=cmd_deadline_reminder)
 
     exp = sub.add_parser(
         "export", aliases=["export-onedrive"],

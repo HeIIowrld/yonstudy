@@ -50,7 +50,7 @@ def _course_filter(year: str, semester: str) -> tuple[str, tuple]:
 def _date_in(value: str | None) -> date | None:
     if not value:
         return None
-    m = re.search(r"(20\d{2})\D(\d{1,2})\D(\d{1,2})", value)
+    m = re.search(r"(20\d{2})\D+(\d{1,2})\D+(\d{1,2})", value)
     if not m:
         return None
     try:
@@ -794,6 +794,22 @@ def _remaining_assignments(report: DailyReport) -> list[dict]:
     ]
 
 
+def assignments_due_today(report: DailyReport) -> list[dict]:
+    """오늘 마감인 제출 활동을 제출 완료 항목까지 포함해 반환한다."""
+    return [
+        row for row in report.semester_assignments
+        if _date_in(row.get("due_at") or row.get("open_to")) == report.target
+    ]
+
+
+def assignment_submission_label(row: dict) -> str:
+    if row.get("submitted") == 1:
+        return "제출 완료"
+    if row.get("submitted") == 0:
+        return "미제출"
+    return "제출 상태 미확인"
+
+
 def _is_weekly_digest(report: DailyReport) -> bool:
     """일요일 메일에만 학기 전체 상세 목록을 싣는다."""
     return report.target.weekday() == 6
@@ -895,6 +911,18 @@ def render_email_text(report: DailyReport) -> str:
     ]
     if report.stale:
         lines += ["", "주의: 오늘 자료를 아직 모두 확인하지 못해 내용이 달라질 수 있습니다."]
+
+    due_today = assignments_due_today(report)
+    lines += ["", f"오늘 마감 과제 ({len(due_today)}개)"]
+    for row in due_today:
+        lines.append(
+            f"- {assignment_submission_label(row)} · {row['course_name']} · {row['title']}"
+            f" · 마감 {row.get('due_at') or row.get('open_to')}"
+            + (f"\n  {row['url']}" if row.get("url") else "")
+        )
+    if not due_today:
+        lines.append("- 확인된 오늘 마감 과제 없음")
+    lines.append("22시에 제출 상태를 다시 확인해 오늘 마감 미제출 과제가 있으면 추가 알림을 보냅니다.")
 
     if video_progress:
         lines += ["", "과목별 동영상 수강률"]
@@ -1048,6 +1076,19 @@ def render_report_html(report: DailyReport) -> str:
     )
 
     rows: list[str] = []
+    due_today = assignments_due_today(report)
+    rows.append(section(
+        f"오늘 마감 과제 ({len(due_today)}개)",
+        "".join(
+            item(
+                r["title"],
+                f"{r['course_name']} · {assignment_submission_label(r)}",
+                f"마감 {r.get('due_at') or r.get('open_to')}",
+                r.get("url"),
+            ) for r in due_today
+        ) or "확인된 오늘 마감 과제 없음",
+        "22시에 다시 확인하여 오늘 마감 미제출 과제가 있으면 추가 알림을 보냅니다.",
+    ))
     if report.stale:
         rows.append(
             '<tr><td style="padding:0 24px 18px"><div style="background:#fff7ed;border:1px solid #fed7aa;'

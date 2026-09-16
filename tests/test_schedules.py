@@ -6,6 +6,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ArchiveScheduleTests(unittest.TestCase):
+    def test_deadline_reminder_runs_at_22_and_waits_for_other_jobs(self):
+        from deploy.run_job import JOBS
+
+        cron = (ROOT / "deploy/yonstudy.cron").read_text(encoding="utf-8")
+        timer = (ROOT / "systemd/yonstudy-deadline-reminder.timer").read_text(encoding="utf-8")
+        self.assertIn("0 22 * * * root /app/deploy/run-job.sh deadline-reminder", cron)
+        self.assertIn("OnCalendar=*-*-* 22:00:00 Asia/Seoul", timer)
+        self.assertEqual(JOBS["deadline-reminder"], (["deadline-reminder"], True))
+        self.assertIn("--refresh-assignments", JOBS["report"][0])
+
     def test_systemd_archives_every_six_hours(self):
         timer = (ROOT / "systemd/yonstudy-daily.timer").read_text(encoding="utf-8")
 

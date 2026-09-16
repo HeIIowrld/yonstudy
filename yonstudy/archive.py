@@ -220,6 +220,7 @@ class Archiver:
         fetch_files: bool = True,
         fetch_boards: bool = True,
         board_pages: int = 3,
+        assignments_only: bool = False,
     ) -> dict:
         cdir = f"{course.year}-{course.semester}/{course.slug}"
         self.say(f"\n[{course.year} {course.semester}] {course.name} (cid={course.course_id})")
@@ -256,6 +257,25 @@ class Archiver:
         for a in activities:
             counts[a.modname] = counts.get(a.modname, 0) + 1
         self.say("  활동: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+
+        if assignments_only:
+            errors = []
+            for activity in activities:
+                if not activity.is_submission or activity.restricted:
+                    continue
+                started = _now()
+                self._sync_submission(course, activity, cdir, False)
+                rows = self.s.query(
+                    "SELECT seen_at,status,submitted FROM submission WHERE cmid=?",
+                    (activity.cmid,),
+                )
+                if (not rows or (rows[0]["seen_at"] or "") < started
+                    or not (rows[0]["status"] or rows[0]["submitted"] == 1)):
+                    errors.append(activity.cmid)
+            self.s.commit()
+            if errors:
+                raise RuntimeError(f"제출 상태를 새로 확인하지 못했습니다: {errors}")
+            return counts
 
         # 시청 시간은 강좌 페이지가 아니라 진도 리포트를 기준으로 한다.
         progress_by_cmid: dict[int, P.ProgressRow] = {}
