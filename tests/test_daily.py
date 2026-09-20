@@ -272,7 +272,7 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(report.completion_by_course[0]["effective_incomplete"], 1)
         self.assertIn("확인 필요", render_email_text(report))
 
-    def test_daily_email_is_compact_and_sunday_lists_full_term_videos(self):
+    def test_daily_email_keeps_video_details_compact(self):
         day = self.today.isoformat()
         tomorrow = (self.today + timedelta(days=1)).isoformat()
         after_horizon = (self.today + timedelta(days=15)).isoformat()
@@ -340,21 +340,20 @@ class DailyReportTests(unittest.TestCase):
         self.assertNotIn("완료한 강의", html_body)
         self.assertNotIn("동영상 수강 현황", html_body)
 
-        sunday = report.target + timedelta(days=(6 - report.target.weekday()) % 7)
-        weekly_report = replace(report, target=sunday)
-        weekly_text = render_email_text(weekly_report)
-        weekly_html = render_report_html(weekly_report)
-        self.assertIn("이번 학기 강의 목록 (5개)", weekly_text)
-        self.assertIn("완료한 강의", weekly_text)
-        self.assertIn("15일 후 공개 강의", weekly_text)
-        self.assertIn("이번 학기 강의 목록 (5개)", weekly_html)
-        self.assertIn("일요일 주간 상세판", weekly_html)
+        for offset in range(7):
+            target = report.target + timedelta(days=offset)
+            for render in (render_email_text, render_report_html):
+                with self.subTest(weekday=target.weekday(), renderer=render.__name__):
+                    body = render(replace(report, target=target))
+                    self.assertNotIn("이번 학기 강의 목록", body)
+                    self.assertNotIn("완료한 강의", body)
+                    self.assertNotIn("일요일 주간 상세판", body)
 
         full_body = render_report(report)
         self.assertIn("[공개 예정] [테스트과목]", full_body)
         self.assertNotIn("내일 공개 강의 · 미완료", full_body)
 
-    def test_daily_email_is_compact_and_sunday_lists_all_assignments(self):
+    def test_daily_email_keeps_assignment_details_compact(self):
         day = self.today.isoformat()
         tomorrow = (self.today + timedelta(days=1)).isoformat()
         assignments = [
@@ -405,14 +404,56 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn("14일 이내 공개 예정 (1개)", html_body)
         self.assertIn("다음 과제", html_body)
 
-        sunday = report.target + timedelta(days=(6 - report.target.weekday()) % 7)
-        weekly_report = replace(report, target=sunday)
-        weekly_text = render_email_text(weekly_report)
-        weekly_html = render_report_html(weekly_report)
-        self.assertIn("이번 학기 과제·제출 목록 (3개)", weekly_text)
-        self.assertIn("제출한 과제", weekly_text)
-        self.assertIn("이번 학기 과제·제출 목록 (3개)", weekly_html)
-        self.assertIn("일요일 주간 상세판", weekly_html)
+        for offset in range(7):
+            target = report.target + timedelta(days=offset)
+            for render in (render_email_text, render_report_html):
+                with self.subTest(weekday=target.weekday(), renderer=render.__name__):
+                    body = render(replace(report, target=target))
+                    self.assertNotIn("이번 학기 과제·제출 목록", body)
+                    self.assertNotIn("일요일 주간 상세판", body)
+
+        full_body = render_report(report)
+        self.assertIn("이번 학기 과제·제출 현황", full_body)
+        self.assertIn("제출한 과제", full_body)
+
+    def test_unknown_external_submission_is_not_repeated_as_pending(self):
+        yesterday = (self.today - timedelta(days=1)).isoformat()
+        tomorrow = (self.today + timedelta(days=1)).isoformat()
+        for cmid, modname, title, submitted in (
+            (30, "assign", "실제 미제출 과제", 0),
+            (31, "lti", "이전 주차 외부 과제", None),
+        ):
+            self.store.save_activity({
+                "cmid": cmid, "course_id": 1, "modname": modname,
+                "title": title, "completion": None, "restricted": 0,
+                "open_from": f"{yesterday} 00:00:00",
+                "seen_at": f"{yesterday}T10:00:00",
+            })
+            self.store.save_submission({
+                "cmid": cmid, "course_id": 1, "modname": modname,
+                "title": title, "submitted": submitted,
+                "due_at": f"{tomorrow} 23:59:59" if submitted == 0 else None,
+            })
+        self.store.commit()
+        report = build_daily_report(self.store, target=self.today)
+
+        self.assertIn("현재 미제출 1개", render_email_text(report))
+        for render in (render_email_text, render_report_html):
+            with self.subTest(renderer=render.__name__):
+                body = render(report)
+                self.assertIn("실제 미제출 과제", body)
+                self.assertNotIn("이전 주차 외부 과제", body)
+                self.assertIn("제출 상태 미확인 과제 1개", body)
+                # Even with no confirmed pending items, keep the unknown count visible.
+                unknown_only = replace(
+                    report, semester_assignments=[
+                        row for row in report.semester_assignments if row["submitted"] is None
+                    ],
+                    today_schedule=[], todos=[], updates=[],
+                )
+                self.assertIn("제출 상태 미확인 과제 1개", render(unknown_only))
+        full_body = render_report(report)
+        self.assertRegex(full_body, r"\[제출 상태 미확인\] \[테스트과목\].*이전 주차 외부 과제")
 
     @patch("yonstudy.daily.Path.exists", return_value=True)
     @patch("yonstudy.daily.subprocess.run")

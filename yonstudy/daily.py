@@ -780,6 +780,8 @@ def _assignment_term_status(row: dict, target: date) -> str:
     opens = _date_in(row.get("open_from"))
     if opens and opens > target:
         return "공개 예정"
+    if row.get("submitted") != 0:
+        return "제출 상태 미확인"
     deadline = _date_in(row.get("due_at") or row.get("open_to"))
     if deadline and deadline < target:
         return "미제출 · 마감 지남"
@@ -789,7 +791,7 @@ def _assignment_term_status(row: dict, target: date) -> str:
 def _remaining_assignments(report: DailyReport) -> list[dict]:
     return [
         row for row in report.semester_assignments
-        if _assignment_term_status(row, report.target) != "제출 완료"
+        if row.get("submitted") == 0
         and _assignment_term_status(row, report.target) != "공개 예정"
     ]
 
@@ -808,11 +810,6 @@ def assignment_submission_label(row: dict) -> str:
     if row.get("submitted") == 0:
         return "미제출"
     return "제출 상태 미확인"
-
-
-def _is_weekly_digest(report: DailyReport) -> bool:
-    """일요일 메일에만 학기 전체 상세 목록을 싣는다."""
-    return report.target.weekday() == 6
 
 
 def _upcoming_releases(report: DailyReport, horizon_days: int = 14) -> list[dict]:
@@ -889,8 +886,11 @@ def render_email_text(report: DailyReport) -> str:
     videos, submissions, others = _email_completion_groups(report)
     video_progress = _video_progress_by_course(report)
     remaining_assignments = _remaining_assignments(report)
-    weekly_digest = _is_weekly_digest(report)
-    upcoming_releases = [] if weekly_digest else _upcoming_releases(report)
+    upcoming_releases = _upcoming_releases(report)
+    unknown_assignments = sum(
+        _assignment_term_status(row, report.target) == "제출 상태 미확인"
+        for row in report.semester_assignments
+    )
     term_video_total = sum(r["total"] for r in video_progress)
     term_video_done = sum(r["done"] for r in video_progress)
     term_video_remaining = sum(r["remaining"] for r in video_progress)
@@ -909,6 +909,8 @@ def render_email_text(report: DailyReport) -> str:
         f"오늘 일정 {len(report.today_schedule)}개 · 새 소식 "
         f"{len(report.new_posts) + len(report.new_files)}개",
     ]
+    if unknown_assignments:
+        lines.append(f"제출 상태 미확인 과제 {unknown_assignments}개 · LearnUs에서 확인이 필요합니다.")
     if report.stale:
         lines += ["", "주의: 오늘 자료를 아직 모두 확인하지 못해 내용이 달라질 수 있습니다."]
 
@@ -933,28 +935,6 @@ def render_email_text(report: DailyReport) -> str:
             f"학기 전체 확인 {r['total']}개 · 공개 예정 {r['upcoming']}개"
             for r in video_progress
         ]
-
-    if weekly_digest:
-        lines += ["", f"이번 학기 강의 목록 ({len(report.attendance)}개)"]
-        lines += [
-            f"- {_video_term_status(row, report.target)} · {row['course_name']} · "
-            f"{row.get('section_name') or '주차 미표시'} · {row['title']} · "
-            f"진도 {row.get('progress_pct') or 0:g}%"
-            + (f" · 남은 {_video_remaining_minutes(row)}분"
-               if _video_term_status(row, report.target) in {"수강 중", "미수강", "1회 재생 필요"}
-               and _video_remaining_minutes(row) is not None else "")
-            + (f" · 출석 마감 {_format_datetime_ko(row.get('open_to'))}"
-               if row.get("open_to") else "")
-            for row in report.attendance
-        ] or ["- 확인된 동영상 강의 없음"]
-
-        lines += ["", f"이번 학기 과제·제출 목록 ({len(report.semester_assignments)}개)"]
-        lines += [
-            f"- {_assignment_term_status(row, report.target)} · {row['course_name']} · {row['title']}"
-            + (f" · {_deadline_summary(row)}"
-               if row.get("due_at") or row.get("open_to") else "")
-            for row in report.semester_assignments
-        ] or ["- 확인된 제출 활동 없음"]
 
     if upcoming_releases:
         lines += ["", f"14일 이내 공개 예정 ({len(upcoming_releases)}개)"]
@@ -1025,8 +1005,11 @@ def render_report_html(report: DailyReport) -> str:
     remaining_video_count = sum(r["remaining"] for r in video_progress)
     total_video_count = sum(r["total"] for r in video_progress)
     remaining_assignments = _remaining_assignments(report)
-    weekly_digest = _is_weekly_digest(report)
-    upcoming_releases = [] if weekly_digest else _upcoming_releases(report)
+    upcoming_releases = _upcoming_releases(report)
+    unknown_assignments = sum(
+        _assignment_term_status(row, report.target) == "제출 상태 미확인"
+        for row in report.semester_assignments
+    )
 
     def link(url: str | None, label: str = "LearnUs에서 보기") -> str:
         if not url:
@@ -1120,60 +1103,6 @@ def render_report_html(report: DailyReport) -> str:
             )
         )
 
-    if weekly_digest:
-        lecture_parts = []
-        for r in report.attendance:
-            status = _video_term_status(r, report.target)
-            detail = f"진도 {r.get('progress_pct') or 0:g}%"
-            remaining = _video_remaining_minutes(r)
-            if status in {"수강 중", "미수강", "1회 재생 필요"} and remaining is not None:
-                detail += f" · 약 {remaining}분 남음"
-            if r.get("open_from") and status == "공개 예정":
-                detail += f" · 공개 {_format_datetime_ko(r['open_from'])}"
-            if r.get("open_to"):
-                detail += f" · 출석 인정 마감 {_format_datetime_ko(r['open_to'])}"
-            lecture_parts.append(
-                item(
-                    r["title"],
-                    f"{r['course_name']} · {r.get('section_name') or '주차 미표시'} · {status}",
-                    detail,
-                    r.get("url"),
-                )
-            )
-        rows.append(
-            section(
-                f"이번 학기 강의 목록 ({len(report.attendance)}개)",
-                "".join(lecture_parts) or '<div style="color:#64748b">확인된 동영상 강의가 없습니다.</div>',
-                "일요일 주간 상세판: 완료·수강 중·미수강·1회 재생·공개 예정 강의를 모두 표시합니다.",
-            )
-        )
-
-        assignment_parts = []
-        for r in report.semester_assignments:
-            status = _assignment_term_status(r, report.target)
-            detail = (
-                _deadline_summary(r)
-                if r.get("due_at") or r.get("open_to")
-                else "마감 시간 미표시"
-            )
-            if r.get("grading_status"):
-                detail += f" · 채점 {r['grading_status']}"
-            assignment_parts.append(
-                item(
-                    r["title"],
-                    f"{r['course_name']} · {status}",
-                    detail,
-                    r.get("url"),
-                )
-            )
-        rows.append(
-            section(
-                f"이번 학기 과제·제출 목록 ({len(report.semester_assignments)}개)",
-                "".join(assignment_parts) or '<div style="color:#64748b">확인된 제출 활동이 없습니다.</div>',
-                "일요일 주간 상세판: 제출 완료, 미제출, 공개 예정 상태를 모두 표시합니다.",
-            )
-        )
-
     if upcoming_releases:
         release_parts = []
         for r in upcoming_releases:
@@ -1216,13 +1145,18 @@ def render_report_html(report: DailyReport) -> str:
     for r in report.today_schedule:
         if r["cmid"] not in used_ids:
             todo_parts.append(item(r["title"], f"{r['course_name']} · {r['schedule_kind']}", url=r.get("url")))
+    assignment_note = (
+        f"제출 상태 미확인 과제 {unknown_assignments}개 · LearnUs에서 확인이 필요합니다."
+        if unknown_assignments else ""
+    )
     if todo_parts:
-        rows.append(section("현재 남은 항목", "".join(todo_parts)))
+        rows.append(section("현재 남은 항목", "".join(todo_parts), assignment_note))
     else:
         rows.append(
             section(
                 "현재 남은 항목",
                 '<div style="padding:8px 0;color:#475569;font-size:14px">현재 남은 미제출 과제나 수강 가능한 미완료 영상이 없습니다.</div>',
+                assignment_note,
             )
         )
 
