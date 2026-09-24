@@ -16,9 +16,12 @@ class RemoteTranscriptionTests(unittest.TestCase):
 
     @patch("deploy.remote_transcribe_loop._run")
     def test_archive_pull_is_limited_to_media_and_subtitles(self, run):
-        pull_archive("nas:semester", Path("/srv/mirror"))
+        with tempfile.TemporaryDirectory() as root:
+            mirror = Path(root) / "mirror"
+            pull_archive("nas:semester", mirror)
         args = run.call_args.args
-        self.assertEqual(args[:4], ("rclone", "copy", "nas:semester", "/srv/mirror"))
+        self.assertEqual(args[:3], ("rclone", "copy", "nas:semester"))
+        self.assertEqual(args[3], str(mirror))
         self.assertIn("+ *.m4a", args)
         self.assertIn("+ *.srt", args)
         self.assertIn("- *", args)
