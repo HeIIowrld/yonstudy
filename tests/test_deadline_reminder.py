@@ -124,6 +124,46 @@ class DeadlineReminderTests(unittest.TestCase):
             self.assertEqual(self.run_reminder()[1]["status"], "check_incomplete")
             send.assert_not_called()
 
+    def test_team_submission_exemptions_survive_refresh_without_reminders(self):
+        self.assignment()
+        self.assignment(11, submitted=None)
+        for cmid in (10, 11):
+            self.store.set_assignment_requirement(cmid, "not_required", "팀 대표 제출")
+        self.store.commit()
+
+        def refreshed(*args, **kwargs):
+            self.assignment()
+            self.assignment(11, submitted=None)
+            return []
+
+        with patch("yonstudy.deadline_reminder.refresh_assignments", side_effect=refreshed), \
+             patch("yonstudy.deadline_reminder.send_report") as send:
+            code, state = self.run_reminder()
+            self.assertEqual((code, state["status"]), (0, "nothing_pending"))
+            self.assertEqual((state["pending"], state["due_today_count"], state["unknown_count"]), ([], 0, 0))
+            send.assert_not_called()
+
+            self.store.set_assignment_requirement(10, "auto")
+            self.store.commit()
+            code, state = self.run_reminder()
+            self.assertEqual((code, state["status"]), (0, "sent"))
+            self.assertEqual([row["cmid"] for row in state["pending"]], [10])
+            self.assertEqual(state["unknown_count"], 0)
+            send.assert_called_once()
+
+    def test_team_exemption_does_not_hide_an_individual_deadline(self):
+        self.assignment()
+        self.assignment(11)
+        self.store.set_assignment_requirement(10, "not_required", "팀 대표 제출")
+        self.store.commit()
+        with patch("yonstudy.deadline_reminder.refresh_assignments", return_value=[]), \
+             patch("yonstudy.deadline_reminder.send_report") as send:
+            code, state = self.run_reminder()
+            self.assertEqual((code, state["status"]), (0, "sent"))
+            self.assertEqual([row["cmid"] for row in state["pending"]], [11])
+            self.assertNotIn("과제 10", send.call_args.args[0])
+            self.assertIn("과제 11", send.call_args.args[0])
+
     def test_failed_mail_can_retry(self):
         self.assignment()
         with patch("yonstudy.deadline_reminder.refresh_assignments", return_value=[]), \

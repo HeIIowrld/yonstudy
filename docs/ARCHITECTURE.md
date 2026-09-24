@@ -28,6 +28,11 @@ yonstudy/
 아카이빙은 별도 Python 패키지 없이 돌 수 있게 두고, 무거운 의존성은 오디오, 전사, 재생
 기능에만 격리했다.
 
+전사기는 `compose.transcription.yaml`의 두 실행 프로필을 공유한다. `local`은 아카이브를
+직접 마운트하고, `remote`는 rclone 원격 저장소에서 연산 호스트의 작업 볼륨으로 자료를
+가져온다. 두 프로필은 같은 검토·재전사 워커, 모델 캐시 형식과 상태 형식을 사용한다.
+따라서 실행 위치를 바꿔도 자막 승인 규칙과 원본 백업 방식은 달라지지 않는다.
+
 ## 데이터 흐름
 
 ```
@@ -84,6 +89,10 @@ submission  (cmid PK, course_id, modname, title,
              fields_json, submitted, seen_at, instructions, instructions_html)
              -- assign, turnitintooltwo, vpl, quiz, feedback, choice와 명세가 확인된
              -- Gradescope LTI와 연결된 Yonsei-OJ 상세 명세도 한 테이블로 모은다
+
+assignment_preference (cmid PK, requirement, reason, updated_at)
+             -- 개인 제출 필요 여부: not_required. 행이 없으면 사이트 상태로 판단.
+             -- 수집기가 갱신하는 submission/completion과 분리해 재수집에도 유지한다.
 
 post        (id PK, course_id, cmid, modname, post_id, thread_id,
              no, subject, writer, written_at, hits, replies, url, body,

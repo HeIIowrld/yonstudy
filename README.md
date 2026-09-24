@@ -110,10 +110,25 @@ python cli.py status      # 지금까지 수집한 데이터 요약
 
 - 강좌와 주차별 활동 메타데이터
 - 강의 자료, 게시판 첨부 파일, 본인 제출 파일
-- LearnUs 과제 본문, Gradescope LTI 문항과 연결된 Yonsei-OJ 문제 명세(HTML, Markdown)
+- LearnUs 과제 본문, Gradescope LTI 문항과 연결된 Yonsei-OJ·LeetCode 문제 명세(HTML, Markdown)
+- 과제에 첨부된 Jupyter 노트북의 설명과 시작 코드(코드 실행 없이 추출)
 - 게시판·포럼 글과 본문
 - VOD 주소, 재생 가능 기간, 온라인 출석 진도
 - LearnUs에서 제공하는 자막
+
+과제 명세는 번호 목록·표·이미지·링크·수식과 코드 들여쓰기를 보존한다. Gradescope는
+제출 전 화면과 제출 후 열람 화면을 모두 읽고, LeetCode는 과제에 직접 연결된 공개
+문제의 설명·예제·제약 조건과 Python 3 시작 코드를 추가한다. 외부 문제를 일시적으로
+읽지 못하면 수집 참고에 사유를 표시하고, 같은 과제의 기존 명세가 있으면 유지한다.
+노트북은 교수가 올린 과제 첨부만 읽으며 셀 출력과 실행 기록은 명세에 넣지 않는다.
+
+과제는 내보낸 학기 폴더의 **`과제목록.html`** 또는 과목별 **`과제자료/index.html`**을
+브라우저에서 열어 읽는다. 과제 제목을 누르면 본문과 노트북 지침을 제목·목록·코드가
+구분된 화면으로 볼 수 있다. 편집·제출용 `.ipynb` 원본과 Markdown도 함께 보관한다.
+긴 자료구조 명세는 문제별 목차로 이동할 수 있으며, 예전에 하나의 코드 블록으로
+저장된 OJ 설명도 내보낼 때 제목·입출력·예제·시작 코드로 구분한다. 지수 표기는
+Markdown에서도 `10^4`처럼 보존한다. LeetCode의 공개 예시 그림은 HTML에 함께
+저장하므로 인터넷 없이도 볼 수 있다. PDF가 필요하면 브라우저에서 인쇄하여 저장한다.
 
 영상 MP4 본체는 단독 `archive`가 받지 않는다. 현재 학기 전체 원본 보관은
 `automate`가 6시간마다 수행하며, 수동 실행은 `archive-videos`를 사용한다.
@@ -209,6 +224,24 @@ Docker에는 22시 예약이 기본 포함된다. systemd 배포에서는
 14일 이내 공개 예정 항목과 오늘의 변경 사항만 간결하게 표시한다. 일요일에도 같은
 요약 형식을 사용하며, 학기 전체 강의와 과제 상세 목록은 `report` 명령으로 확인한다.
 제출 상태를 확인할 수 없는 외부 과제는 미제출 수에서 빼고 미확인 개수를 따로 알린다.
+
+대표자만 제출하는 팀과제는 해당 과제를 **본인 제출 불필요**로 지정한다. 사이트의
+미제출 기록은 보존하고, 개인 할 일·미완료 집계·마감 알림에서 제외한다. 사유와 지정은
+재수집 후에도 유지되며 학기 전체 목록에서 확인할 수 있다. 제목에 `팀과제`가 있다는
+이유로 다른 과제까지 자동 제외하지 않는다.
+
+```bash
+python cli.py assignment-status                     # 이번 학기 과제 ID와 상태
+python cli.py assignment-status 4566742 --not-required --reason "팀 대표자가 제출"
+python cli.py assignment-status 4566742 --auto       # 다시 사이트 상태로 판단
+```
+
+설정은 명령에 사용한 `--store`의 DB에 저장된다. NAS 자동 리포트에 적용할 때는 해당
+컨테이너의 `/data/store`를 지정한다.
+
+```bash
+sudo docker exec yonstudy python /app/cli.py --store /data/store assignment-status 4566742 --not-required --reason "팀 대표자가 제출"
+```
 
 ```bash
 python cli.py report                         # 저장된 DB로 출력
@@ -495,14 +528,50 @@ OneDrive와 Google Drive는 로컬 동기화 폴더 또는 `rclone mount` 경로
 보관 폴더나 NAS 마운트를 권장한다. Whisper는 자막까지만 만들며, 강의 요약은 별도 LLM 또는
 추출 요약 단계를 나중에 연결해야 한다.
 
-Docker Compose에서는 CPU 전사기를 선택적 프로필로 켠다. 호스트 경로는
-`YONSTUDY_ARCHIVE_DIR`, 컨테이너 안에서 스캔할 학기는 `YONSTUDY_TRANSCRIBE_ROOT`에
-`/archive/2026-2`처럼 지정한다. 30분 간격으로 한 번에 한 편씩 처리한다.
+전사 배포는 루트의 `compose.transcription.yaml` 하나에서 실행 위치를 고른다.
+`local` 프로필은 NAS나 로컬 디스크의 학기 폴더를 컨테이너에 직접 마운트한다.
+`remote` 프로필은 연산 장비의 작업 디스크로 미디어와 자막을 rclone 증분 복사하고,
+검토를 통과한 결과·상태·원본 자막 백업만 저장소로 되돌린다. 두 서비스는 같은
+컨테이너 이름을 사용하므로 한 호스트에서 실수로 동시에 실행되지 않는다.
+
+설정 예시를 복사하고 `COMPOSE_PROFILES`를 `local` 또는 `remote`로 지정한다. 실제 경로와
+rclone 원격 경로가 들어가는 `.env.transcription` 및 `rclone.conf`는 Git에 올리지 않는다.
 
 ```bash
-docker compose --profile transcription up -d --build transcriber
-docker compose logs -f transcriber
+cp deploy/transcription.env.example .env.transcription
+$EDITOR .env.transcription
+docker compose --env-file .env.transcription -f compose.transcription.yaml up -d --build
+docker compose --env-file .env.transcription -f compose.transcription.yaml logs -f
+
+# 모드 변경: 기존 작업자를 내린 뒤 COMPOSE_PROFILES를 바꾸고 다시 실행
+docker compose --env-file .env.transcription -f compose.transcription.yaml down
 ```
+
+`local`의 기본값은 `small`·CPU 2개·int8·메모리 2GB다. `remote`의 기본값은
+`large-v3-turbo`·CPU 12개·int8·메모리 7GB다. 모델 캐시, 작업 공간, 상태와 백업은
+호스트 볼륨에 남으므로 이미지 교체 뒤에도 유지된다. 필요하면 같은 env 파일에서 모델,
+스레드 수, CPU 집합과 메모리 상한을 덮어쓴다.
+
+자막 구조 오류, 비정상적으로 긴 저밀도 구간, 심각한 문구 반복이 있는 파일을 먼저
+재전사하고 자막 없는 녹음과 영상을 이어서 처리한다. 원래 자막은 상태 폴더의
+`backups/`에 보관하며 새 결과가 검토를 통과하고 실행 중 원본이 바뀌지 않은 경우에만
+교체한다. 같은 입력은 두 번까지만 시도하고 실패한 파일은 다른 녹음 처리를 막지 않는다.
+
+검토는 구조와 전사 실패 징후를 찾는 방식이므로 발화 내용의 정확도를 보증하지 않는다.
+학기 폴더의 `전사_현황.md`에서 진행 상태를 확인할 수 있다. 자세한 기록과 백업은
+`transcription/state.json`, `transcription/status.md`, `transcription/backups/`에 남으며
+컨테이너 재시작 후에도 유지된다. 같은 상태 폴더에 대한 작업은 중복 실행하지 않는다.
+
+```bash
+# 모델을 실행하거나 기존 자막을 바꾸지 않고 검토 결과 확인
+python cli.py transcribe-review /path/to/2026-2 --state-dir ./store/transcription --dry-run
+```
+
+Docker를 중첩 실행하지 않는 LXC에서는 같은 remote 작업자를
+`systemd/yonstudy-remote-transcribe.service`로 직접 실행할 수도 있다. 동작과 환경 변수는
+Compose의 `remote` 프로필과 같다. `YONSTUDY_TRANSCRIBE_REPROCESS_LIST`에는 이전 작은
+모델의 결과처럼 다시 만들 미디어를 아카이브 루트 기준 상대 경로로 한 줄씩 적는다.
+NAS 쪽 자막이 연산 장비의 사본보다 새로우면 사용자 수정으로 보고 덮어쓰지 않는다.
 
 ### 강의안과 자막 정렬
 

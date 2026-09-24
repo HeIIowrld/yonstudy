@@ -209,6 +209,82 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_assignment_status(args) -> int:
+    """사이트 상태를 바꾸지 않고 개인 제출 필요 여부를 조회·지정한다."""
+    from yonstudy.assignment_state import submission_requirement_label
+    from yonstudy.daily import current_term, SEOUL
+
+    requirement = args.requirement
+    if requirement and args.cmid is None:
+        print("제출 필요 여부를 지정할 과제 ID(cmid)가 필요합니다.", file=sys.stderr)
+        return 2
+    if args.reason and requirement != "not_required":
+        print("--reason은 --not-required와 함께 사용하세요.", file=sys.stderr)
+        return 2
+    store = Store(args.store)
+    if requirement:
+        try:
+            store.set_assignment_requirement(args.cmid, requirement, args.reason or "")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        store.commit()
+
+    where = ["a.modname IN ('assign','turnitintooltwo','vpl','lti','quiz','feedback','choice')"]
+    values = []
+    if args.cmid is not None:
+        where.append("a.cmid=?")
+        values.append(args.cmid)
+    else:
+        where.extend(["a.present=1", "c.enrolled=1"])
+        if not args.all_terms:
+            year, semester = current_term(datetime.now(SEOUL).date())
+            where.extend(["c.year=?", "c.semester=?"])
+            values.extend([args.year or year, args.semester or semester])
+        else:
+            for key in ("year", "semester"):
+                if getattr(args, key):
+                    where.append(f"c.{key}=?")
+                    values.append(getattr(args, key))
+    rows = store.query(
+        """SELECT a.cmid,a.title,COALESCE(c.name,'과목 미확인') AS course_name,s.submitted,s.status,
+                  p.requirement AS submission_requirement,p.reason AS submission_reason
+             FROM activity a LEFT JOIN course c USING(course_id)
+             LEFT JOIN submission s ON s.cmid=a.cmid
+             LEFT JOIN assignment_preference p ON p.cmid=a.cmid
+            WHERE """ + " AND ".join(where) + " ORDER BY c.name,a.section_idx,a.cmid",
+        tuple(values),
+    )
+    if not rows and args.cmid is not None:
+        # Legacy/imported stores can contain a submission before its activity.
+        # Keep the command's supported records consistent with the setter.
+        rows = store.query(
+            """SELECT s.cmid,s.title,COALESCE(c.name,'과목 미확인') AS course_name,
+                      s.submitted,s.status,p.requirement AS submission_requirement,
+                      p.reason AS submission_reason
+                 FROM submission s LEFT JOIN course c USING(course_id)
+                 LEFT JOIN assignment_preference p ON p.cmid=s.cmid
+                WHERE s.cmid=?""", (args.cmid,),
+        )
+    if not rows:
+        print("조회할 과제가 없습니다.")
+        return 1 if args.cmid is not None else 0
+    for stored in rows:
+        row = dict(stored)
+        status = submission_requirement_label(row) or row.get("status") or (
+            "제출 완료" if row.get("submitted") == 1 else
+            "미제출" if row.get("submitted") == 0 else "제출 상태 미확인"
+        )
+        print(f"{row['cmid']} · {row['course_name']} · {row['title']} · {status}")
+        if row.get("submission_reason"):
+            print(f"  사유: {row['submission_reason']}")
+        if row.get("submission_requirement") == "not_required":
+            print(f"  사이트 기록: {row.get('status') or '제출 상태 미확인'} · 미완료 집계와 마감 알림에서 제외")
+    if requirement == "auto":
+        print("사이트 상태에 따른 자동 판정으로 복원했습니다.")
+    return 0
+
+
 def cmd_normalize_names(args) -> int:
     """기존 아카이브의 macOS 분해형 파일명을 NFC로 복구한다."""
     from yonstudy.filename_normalization import normalize_tree
@@ -733,6 +809,40 @@ def cmd_transcribe(args) -> int:
     return 1 if result.failed_files else 0
 
 
+def cmd_transcribe_review(args) -> int:
+    """자막을 검토하고 누락·의심 자막만 보존 절차를 거쳐 전사한다."""
+    from yonstudy.transcription_worker import run_once
+
+    if not args.path:
+        print("검토할 학기 폴더 또는 YONSTUDY_TRANSCRIBE_ROOT가 필요합니다.", file=sys.stderr)
+        return 2
+    language = args.language.strip()
+    reprocess_paths = []
+    if args.reprocess_list:
+        try:
+            reprocess_paths = [
+                line.strip() for line in Path(args.reprocess_list).read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        except OSError as exc:
+            print(f"재전사 목록을 읽지 못했습니다: {exc}", file=sys.stderr)
+            return 2
+    try:
+        result = run_once(
+            args.path, state_dir=args.state_dir, limit=args.limit,
+            model=args.model, device=args.device, compute_type=args.compute_type,
+            language=None if language.casefold() in {"", "auto"} else language,
+            cpu_threads=args.cpu_threads, model_cache=args.model_cache,
+            stable_seconds=args.stable_seconds, beam_size=args.beam_size,
+            dry_run=args.dry_run, reprocess_paths=reprocess_paths, model_id=args.model_id,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"자막 검토 실패: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 1 if result.get("failed_files") else 0
+
+
 def cmd_timetable_import(args) -> int:
     """외부 TOML/JSON/CSV 시간표를 녹음 분류용으로 저장한다."""
     from dataclasses import asdict
@@ -917,6 +1027,18 @@ def main() -> int:
     sub.add_parser("courses").set_defaults(fn=cmd_courses)
     sub.add_parser("keepalive", help="로그인 세션 유휴 만료 방지").set_defaults(fn=cmd_keepalive)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    assignment_status = sub.add_parser(
+        "assignment-status", help="과제 조회 및 개인 제출 불필요 지정·해제",
+    )
+    assignment_status.add_argument("cmid", nargs="?", type=int, help="과제 ID (생략하면 이번 학기 목록)")
+    requirement = assignment_status.add_mutually_exclusive_group()
+    requirement.add_argument("--not-required", dest="requirement", action="store_const", const="not_required", help="본인 제출 불필요: 미완료 집계·알림에서 제외")
+    requirement.add_argument("--auto", dest="requirement", action="store_const", const="auto", help="개인 지정을 해제하고 사이트 상태에 따른 자동 판정")
+    assignment_status.add_argument("--reason", help="제출 불필요 사유 (예: 팀 대표자가 제출)")
+    assignment_status.add_argument("--year")
+    assignment_status.add_argument("--semester")
+    assignment_status.add_argument("--all-terms", action="store_true")
+    assignment_status.set_defaults(fn=cmd_assignment_status)
     normalize_names = sub.add_parser(
         "normalize-names",
         help="macOS에서 분리된 한글 파일·폴더명을 Windows용 NFC로 복구",
@@ -1073,6 +1195,27 @@ def main() -> int:
     transcription.add_argument("--dry-run", action="store_true")
     transcription.add_argument("--json", action="store_true")
     transcription.set_defaults(fn=cmd_transcribe)
+
+    review = sub.add_parser(
+        "transcribe-review", help="기존 자막 검토와 누락·의심 자막의 안전한 재전사",
+    )
+    review.add_argument("path", nargs="?", default=DEFAULT_TRANSCRIBE_ROOT)
+    review.add_argument("--state-dir", default=os.environ.get(
+        "YONSTUDY_TRANSCRIBE_STATE_DIR", str(PROJECT_ROOT / "store/transcription")),
+        help="처리 상태·기존 자막 백업·검토 보고서를 보관할 폴더")
+    review.add_argument("--model", default=DEFAULT_TRANSCRIBE_MODEL)
+    review.add_argument("--device", choices=("auto", "cpu", "cuda"), default=DEFAULT_TRANSCRIBE_DEVICE)
+    review.add_argument("--compute-type", default=DEFAULT_TRANSCRIBE_COMPUTE_TYPE)
+    review.add_argument("--language", default=DEFAULT_TRANSCRIBE_LANGUAGE)
+    review.add_argument("--cpu-threads", type=int, default=DEFAULT_TRANSCRIBE_CPU_THREADS)
+    review.add_argument("--model-cache", default=DEFAULT_TRANSCRIBE_MODEL_CACHE)
+    review.add_argument("--beam-size", type=int, default=1)
+    review.add_argument("--stable-seconds", type=int, default=DEFAULT_TRANSCRIBE_STABLE_SECONDS)
+    review.add_argument("--limit", type=int, default=1)
+    review.add_argument("--dry-run", action="store_true", help="모델 실행이나 자막 교체 없이 검토 보고서만 생성")
+    review.add_argument("--reprocess-list", help="상위 모델로 다시 만들 미디어의 루트 기준 상대 경로 목록")
+    review.add_argument("--model-id", help="완료 기록에 남길 모델 식별자")
+    review.set_defaults(fn=cmd_transcribe_review)
 
     layout = sub.add_parser(
         "layout-plan",

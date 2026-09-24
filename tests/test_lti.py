@@ -16,10 +16,10 @@ from yonstudy.lti import (
 from yonstudy.store import Store
 
 
-def gradescope_page(props: dict) -> str:
+def gradescope_page(props: dict, component: str = "OnlineAssignmentSubmitter") -> str:
     encoded = html.escape(json.dumps(props, ensure_ascii=False), quote=True)
     return (
-        '<div data-react-class="OnlineAssignmentSubmitter" '
+        f'<div data-react-class="{component}" '
         f'data-react-props="{encoded}"></div>'
     )
 
@@ -91,6 +91,86 @@ class GradescopeAssignmentTests(unittest.TestCase):
     def test_missing_online_assignment_props_is_rejected(self):
         with self.assertRaisesRegex(LtiArchiveError, "명세"):
             parse_gradescope_assignment("<html></html>", "https://www.gradescope.com/")
+
+    def test_submitted_viewer_joins_public_questions_to_outline(self):
+        page = gradescope_page({
+            "assignment": {"title": "Arrays", "submission_format": "online"},
+            "outline": [{"id": 2, "index": 1}, {"id": 1, "index": 2}],
+            "questions": [
+                {"id": 1, "title": "Rotate Array", "weight": "5.0", "content": [
+                    {"type": "text", "value": "https://leetcode.com/problems/rotate-array/"}]},
+                {"id": 2, "title": "Reverse Linked List", "weight": "5.0", "content": [
+                    {"type": "text", "value": "https://leetcode.com/problems/reverse-linked-list/"}]},
+            ],
+            "question_submissions": [{"answer": "private solution"}],
+            "text_files": [{"content": "private source code"}],
+            "current_user": {"email": "private@example.test"},
+        }, component="AssignmentSubmissionViewer")
+        assignment = parse_gradescope_assignment(page, "https://www.gradescope.com/")
+        self.assertEqual(assignment.title, "Arrays")
+        self.assertEqual(assignment.total_points, "10")
+        self.assertIn("문항 1. Reverse Linked List", assignment.instructions)
+        self.assertIn("문항 2. Rotate Array", assignment.instructions)
+        self.assertNotIn("private", assignment.instructions + assignment.instructions_html)
+
+    def test_html_prompts_preserve_links_images_tables_and_code(self):
+        assignment = parse_gradescope_assignment(gradescope_page({
+            "title": "Rich prompt", "instructions": "<p>전체 <strong>안내</strong></p>",
+            "outline": [{"title": "문제", "content": [{"type": "text", "value": (
+                '<p>Read <a href="/problems/example">the problem</a>.</p>'
+                '<img src="/figures/tree.png" alt="Tree">'
+                '<table><tr><th>Input</th><th>Output</th></tr><tr><td>1</td><td>2</td></tr></table>'
+                '<pre><code>if (a &lt; b) {\n    return a;\n}</code></pre>'
+                '<script>private_token()</script>'
+            )}]}],
+        }), "https://www.gradescope.com/courses/1/assignments/2/submissions/new")
+        self.assertIn("[the problem](https://www.gradescope.com/problems/example)", assignment.instructions)
+        self.assertIn("![Tree](https://www.gradescope.com/figures/tree.png)", assignment.instructions)
+        self.assertIn("| Input | Output |", assignment.instructions)
+        self.assertIn("    return a;", assignment.instructions)
+        self.assertIn("전체", assignment.instructions)
+        self.assertIn("<table>", assignment.instructions_html)
+        self.assertIn("<pre>", assignment.instructions_html)
+        self.assertNotIn("private_token", assignment.instructions + assignment.instructions_html)
+
+    def test_markdown_and_comparisons_survive_without_reading_input_answers(self):
+        body = "Use `vector<int>` when 0 < n and n > 1.\n\n```cpp\nif (a < b) {\n    return a;\n}\n```"
+        assignment = parse_gradescope_assignment(gradescope_page({
+            "title": "Code", "outline": [{"title": "문제", "weight": 0, "content": [
+                {"type": "text", "value": body},
+                {"type": "free_response_input", "prompt": "Explain complexity.", "value": "private answer"},
+                {"type": "file_upload_input", "label": "Upload a screenshot.", "value": "private filename"},
+            ]}],
+        }), "https://www.gradescope.com/")
+        self.assertIn(body, assignment.instructions)
+        self.assertIn("Explain complexity.", assignment.instructions)
+        self.assertIn("Upload a screenshot.", assignment.instructions)
+        self.assertIn("<pre><code>if (a &lt; b)", assignment.instructions_html)
+        self.assertNotIn("private", assignment.instructions + assignment.instructions_html)
+        self.assertEqual(assignment.total_points, "0")
+
+    def test_flat_subquestions_keep_hierarchy_without_double_counting_points(self):
+        assignment = parse_gradescope_assignment(gradescope_page({
+            "title": "Nested", "outline": [
+                {"id": 1, "title": "Parent", "weight": 10, "content": "Shared prompt"},
+                {"id": 2, "parent_id": 1, "title": "Child A", "weight": 4},
+                {"id": 3, "parent_id": 1, "title": "Child B", "weight": 6},
+            ],
+        }), "https://www.gradescope.com/")
+        self.assertIn("### 문항 1.1. Child A", assignment.instructions)
+        self.assertIn("### 문항 1.2. Child B", assignment.instructions)
+        self.assertIn("Shared prompt", assignment.instructions)
+        self.assertEqual(assignment.total_points, "10")
+
+    def test_html_intro_does_not_consume_markdown_code_template_tags(self):
+        body = "<p>Implement `vector<int>`.</p>\n\n```cpp\nvector<int> values;\nif (a < b) return a;\n```"
+        assignment = parse_gradescope_assignment(gradescope_page({
+            "outline": [{"title": "Code", "content": body}],
+        }), "https://www.gradescope.com/")
+        self.assertIn("`vector<int>`", assignment.instructions)
+        self.assertIn("```cpp\nvector<int> values;", assignment.instructions)
+        self.assertIn("<code>vector&lt;int&gt;</code>", assignment.instructions_html)
+        self.assertIn("<pre><code>vector&lt;int&gt; values;", assignment.instructions_html)
 
 
 class LtiLaunchTests(unittest.TestCase):
@@ -182,6 +262,45 @@ class LtiLaunchTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LtiArchiveError, "차단"):
             _launch_page(UnsafeClient(), 4545002)
+
+    def test_dashboard_only_follows_matching_existing_submission(self):
+        class DashboardClient:
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, url, referer):
+                self.calls.append(url)
+                if "learnus.org" in url:
+                    return (
+                        '<a href="/courses/1/assignments/2/submissions/3">Arrays</a>'
+                        '<a href="/courses/1/assignments/4/submissions/new">Other</a>',
+                        "https://www.gradescope.com/courses/1",
+                    )
+                return gradescope_page({"title": "Arrays", "outline": []}), url
+
+        client = DashboardClient()
+        _page, final = _launch_page(client, 1, title="Arrays")
+        self.assertEqual(final, "https://www.gradescope.com/courses/1/assignments/2/submissions/3")
+        self.assertEqual(len(client.calls), 2)
+        with self.assertRaises(LtiArchiveError):
+            _launch_page(DashboardClient(), 1, title="Other")
+
+    def test_closed_submission_redirect_does_not_loop(self):
+        class ClosedClient:
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, url, referer):
+                self.calls.append(url)
+                return (
+                    '<a href="/courses/1/assignments/2/submissions/3">Recursion</a>',
+                    "https://www.gradescope.com/courses/1",
+                )
+
+        client = ClosedClient()
+        with self.assertRaisesRegex(LtiArchiveError, "열람"):
+            _launch_page(client, 1, title="Recursion")
+        self.assertEqual(len(client.calls), 2)
 
 
 class LtiArchiveIntegrationTests(unittest.TestCase):

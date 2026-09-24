@@ -7,12 +7,19 @@ ENV LANG=C.UTF-8 \
     TZ=Asia/Seoul \
     YONSTUDY_TRANSCRIBE_MODEL_CACHE=/models
 
-RUN python -m pip install --no-cache-dir "faster-whisper==1.2.1"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg rclone \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir "faster-whisper==1.2.1"
 
 WORKDIR /app
 
 COPY cli.py ./
 COPY yonstudy ./yonstudy
 COPY deploy/transcribe_loop.py ./deploy/transcribe_loop.py
+COPY deploy/remote_transcribe_loop.py ./deploy/remote_transcribe_loop.py
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+    CMD python -c "import os,time,pathlib,sys; p=pathlib.Path(os.environ.get('YONSTUDY_TRANSCRIBE_STATE_DIR','/state'))/'heartbeat'; sys.exit(0 if p.exists() and time.time()-p.stat().st_mtime<180 else 1)"
 
 ENTRYPOINT ["/usr/local/bin/python", "/app/deploy/transcribe_loop.py"]

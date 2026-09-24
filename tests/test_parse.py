@@ -100,7 +100,7 @@ class SubmissionParsingTests(unittest.TestCase):
         self.assertEqual(detail.fields["Due date"], "2026- 9월-15 23:59")
         self.assertEqual(detail.fields["Post date"], "2026- 9월-15 14:08")
         self.assertIn("# AI 실험", detail.instructions)
-        self.assertIn("- 잘한 사례", detail.instructions)
+        self.assertIn("1. 잘한 사례", detail.instructions)
         self.assertIn("<h2>Goal</h2>", detail.instructions_html)
 
     def test_standard_assignment_intro_and_inline_image_are_preserved(self):
@@ -117,6 +117,37 @@ class SubmissionParsingTests(unittest.TestCase):
         self.assertIn("보고서 명세", detail.instructions)
         self.assertEqual(len(detail.intro_files), 1)
         self.assertEqual(detail.intro_files[0][0], "양식")
+
+    def test_image_only_intros_and_distinct_images_are_not_discarded(self):
+        page = '''<div id="intro"><img src="/pluginfile.php/1/mod_assign/intro/a.png"></div>
+        <div class="activity-description"><img src="/pluginfile.php/1/mod_assign/intro/b.png"></div>'''
+        detail = parse_submission(page, 12)
+        self.assertIn('a.png)', detail.instructions)
+        self.assertIn('b.png)', detail.instructions)
+        self.assertEqual(len(detail.intro_files), 2)
+
+    def test_nested_description_relative_attachment_and_code(self):
+        page = '''<div id="intro"><section class="activity-description">
+        <ol><li><p>Run <code>solve()</code></p><pre>if n &lt; 2:
+    return n</pre></li></ol>
+        <a href='/pluginfile.php/1/mod_assign/introattachment/spec.pdf'>
+        <img class="icon icon" src="/theme/image.php/a/core/1/f/pdf">Specification</a>
+        </section></div>'''
+        detail = parse_submission(page, 13)
+        self.assertEqual(detail.instructions.count('Run'), 1)
+        self.assertIn('1. Run `solve()`', detail.instructions)
+        self.assertIn('if n < 2:', detail.instructions)
+        self.assertIn('       return n', detail.instructions)
+        self.assertNotIn('theme/image.php', detail.instructions)
+        self.assertEqual(detail.intro_files, [('Specification', 'https://ys.learnus.org/pluginfile.php/1/mod_assign/introattachment/spec.pdf')])
+
+    def test_turnitin_nested_instruction_table_is_not_cut_off(self):
+        page = '''<table class="extra partDetails"><tr><td><div class="no-overflow">
+        <table><tr><th>Input</th><th>Output</th></tr><tr><td>1</td><td>2</td></tr></table>
+        <p>Submission requirement after table.</p></div></td></tr></table>'''
+        detail = parse_submission(page, 14, 'turnitintooltwo')
+        self.assertIn('| Input | Output |', detail.instructions)
+        self.assertIn('Submission requirement after table.', detail.instructions)
 
 
 class CompletionStateTests(unittest.TestCase):

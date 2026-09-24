@@ -12,10 +12,13 @@ from pathlib import Path, PurePosixPath
 from .daily import SEOUL
 from .export import (
     _safe,
+    assignment_index_entries,
     assignment_spec_path,
+    course_archive_root,
     course_index_path,
     render_assignment_html,
     render_assignment_markdown,
+    render_assignments_index,
     render_course_index,
     term_folder,
 )
@@ -44,6 +47,7 @@ class RemoteSyncResult:
     posts: int = 0
     course_indexes: int = 0
     assignment_specs: int = 0
+    assignment_indexes: int = 0
     uploaded_files: int = 0
     uploaded_bytes: int = 0
     skipped_files: int = 0
@@ -298,16 +302,20 @@ def sync_remote_tree(
         (year, semester),
     )
     result.courses = len(courses)
+    term_index_entries = []
 
     for course in courses:
         course = dict(course)
         activities = [dict(row) for row in store.query(
             """
             SELECT a.cmid,a.modname,a.title,a.url,a.section_idx,a.section_name,
-                   a.completion,s.status AS submission_status,v.status AS vod_status
+                   a.completion,s.cmid AS assignment_cmid,
+                   s.status AS submission_status,v.status AS vod_status,
+                   pref.requirement AS submission_requirement,pref.reason AS submission_reason
               FROM activity a
               LEFT JOIN submission s ON s.cmid=a.cmid
               LEFT JOIN vod v ON v.cmid=a.cmid
+              LEFT JOIN assignment_preference pref ON pref.cmid=a.cmid
              WHERE a.course_id=? AND a.present=1
              ORDER BY a.section_idx,a.cmid
             """,
@@ -413,8 +421,10 @@ def sync_remote_tree(
 
         assignments = [dict(row) for row in store.query(
             """
-            SELECT s.*,a.url,a.section_idx,a.section_name
+            SELECT s.*,a.url,a.section_idx,a.section_name,
+                   pref.requirement AS submission_requirement,pref.reason AS submission_reason
               FROM submission s JOIN activity a ON a.cmid=s.cmid
+              LEFT JOIN assignment_preference pref ON pref.cmid=a.cmid
              WHERE s.course_id=? AND a.present=1
              ORDER BY a.section_idx,s.cmid
             """,
@@ -424,7 +434,7 @@ def sync_remote_tree(
         for assignment in assignments:
             for extension, body in (
                 (".md", render_assignment_markdown(course, assignment)),
-                (".html", render_assignment_html(course, assignment)),
+                (".html", render_assignment_html(course, {**assignment, "index_path": "../index.html"})),
             ):
                 relative = assignment_spec_path(course, assignment, extension)
                 # 과제 본문·기한은 같은 길이로 수정될 수도 있어 내용이 변할 수 있는
@@ -434,6 +444,32 @@ def sync_remote_tree(
                     result.uploaded_bytes += len(body)
                 else:
                     result.skipped_files += 1
+
+        if assignments:
+            index_base = str(course_archive_root(course) / "과제자료")
+            body = render_assignments_index(
+                assignment_index_entries(course, assignments, base=index_base),
+                title=f"{course.get('title') or course.get('name')} · 과제 읽기",
+            )
+            result.assignment_indexes += 1
+            if sink.upload_bytes(str(PurePosixPath(index_base) / "index.html"), body, force=True):
+                result.uploaded_files += 1
+                result.uploaded_bytes += len(body)
+            else:
+                result.skipped_files += 1
+            term_index_entries.extend(assignment_index_entries(
+                course, assignments, base=_safe(term_folder(year, semester))
+            ))
+
+    if term_index_entries:
+        body = render_assignments_index(term_index_entries, title=f"{year} {semester} · 과제 읽기")
+        relative = str(PurePosixPath(_safe(term_folder(year, semester))) / "과제목록.html")
+        result.assignment_indexes += 1
+        if sink.upload_bytes(relative, body, force=True):
+            result.uploaded_files += 1
+            result.uploaded_bytes += len(body)
+        else:
+            result.skipped_files += 1
 
     manifest = {
         **asdict(result), "year": year, "semester": semester,

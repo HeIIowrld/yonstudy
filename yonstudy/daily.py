@@ -15,6 +15,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .assignment_state import is_submission_required, submission_requirement_label
 from .progress import progress_verified
 
 
@@ -245,11 +246,13 @@ def build_daily_report(
         f"""
         SELECT a.cmid,c.name AS course_name,a.modname,a.title,a.url,
                a.open_from,a.open_to,a.late_until,a.completion,
-               v.progress_pct,v.watched_sec,v.duration_sec,s.submitted
+               v.progress_pct,v.watched_sec,v.duration_sec,s.submitted,
+               p.requirement AS submission_requirement,p.reason AS submission_reason
           FROM activity a
           JOIN course c ON c.course_id=a.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
+          LEFT JOIN assignment_preference p ON p.cmid=a.cmid
          WHERE {course_sql} AND a.present=1 AND a.restricted=0
            AND substr(a.open_from,1,10)=?
          ORDER BY a.open_from,c.name,a.section_idx,a.cmid
@@ -367,12 +370,15 @@ def build_daily_report(
         SELECT DISTINCT a.cmid,c.name AS course_name,a.modname,a.title,a.url,
                a.open_from,a.open_to,a.late_until,a.completion,
                v.progress_pct,v.duration_sec,v.watched_sec,v.max_rate,
-               v.can_log_progress,s.submitted,s.due_at
+               v.can_log_progress,s.submitted,s.due_at,
+               p.requirement AS submission_requirement,p.reason AS submission_reason
           FROM activity a
           JOIN course c ON c.course_id=a.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
+          LEFT JOIN assignment_preference p ON p.cmid=a.cmid
          WHERE {course_sql} AND a.present=1 AND a.restricted=0
+           AND COALESCE(p.requirement,'auto')<>'not_required'
            AND COALESCE(a.completion,'')<>'y'
            AND COALESCE(s.submitted,0)<>1
            AND COALESCE({_VOD_VERIFIED_SQL},0)=0
@@ -432,6 +438,8 @@ def build_daily_report(
             today_schedule.append(item)
             scheduled_cmids.add(row["cmid"])
     for row in opened:
+        if not is_submission_required(row):
+            continue
         already_done = (
             row.get("completion") == "y"
             or progress_verified(
@@ -461,10 +469,12 @@ def build_daily_report(
                COALESCE(a.title,s.title) AS title,
                a.url,a.section_idx,a.section_name,a.open_from,a.open_to,a.late_until,
                a.completion,s.submitted,s.status,s.grading_status,s.due_at,
-               s.last_modified,s.grade,s.seen_at
+               s.last_modified,s.grade,s.seen_at,
+               p.requirement AS submission_requirement,p.reason AS submission_reason
           FROM submission s
           JOIN course c ON c.course_id=s.course_id
           LEFT JOIN activity a ON a.cmid=s.cmid
+          LEFT JOIN assignment_preference p ON p.cmid=s.cmid
          WHERE {course_sql} AND a.present=1 AND COALESCE(a.restricted,0)=0
          ORDER BY c.name,COALESCE(s.due_at,a.open_to,'9999'),
                   COALESCE(a.section_idx,0),s.cmid
@@ -478,6 +488,7 @@ def build_daily_report(
         SELECT c.course_id,c.name AS course_name,
                SUM(CASE WHEN a.completion='y' THEN 1 ELSE 0 END) AS done,
                SUM(CASE WHEN a.completion='n'
+                         AND COALESCE(p.requirement,'auto')<>'not_required'
                          AND (a.open_from IS NULL OR substr(a.open_from,1,10)<=?)
                         THEN 1 ELSE 0 END) AS incomplete,
                SUM(CASE WHEN a.open_from IS NOT NULL
@@ -491,9 +502,11 @@ def build_daily_report(
                          AND v.progress_pct IS NULL AND s.submitted IS NULL
                         THEN 1 ELSE 0 END) AS no_state,
                COUNT(*) AS total,
+               SUM(CASE WHEN p.requirement='not_required' THEN 1 ELSE 0 END) AS not_required,
                SUM(CASE WHEN a.completion='y' OR {_VOD_VERIFIED_SQL} OR s.submitted=1
                         THEN 1 ELSE 0 END) AS effective_done,
                SUM(CASE WHEN (a.open_from IS NULL OR substr(a.open_from,1,10)<=?)
+                              AND COALESCE(p.requirement,'auto')<>'not_required'
                               AND COALESCE(a.completion,'')<>'y'
                               AND COALESCE(s.submitted,0)<>1
                               AND COALESCE({_VOD_VERIFIED_SQL},0)=0
@@ -505,6 +518,7 @@ def build_daily_report(
           JOIN activity a ON a.course_id=c.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
+          LEFT JOIN assignment_preference p ON p.cmid=a.cmid
          WHERE {course_sql} AND a.present=1 AND COALESCE(a.restricted,0)=0
          GROUP BY c.course_id,c.name
          ORDER BY c.name
@@ -553,6 +567,9 @@ def build_daily_report(
 
 
 def _status(row: dict) -> str:
+    if not is_submission_required(row):
+        label = submission_requirement_label(row)
+        return label + (f" · {row['submission_reason']}" if row.get("submission_reason") else "")
     if row.get("progress_pct") is not None:
         return f"진도 {row['progress_pct']:g}%"
     if row.get("submitted") is not None:
@@ -582,6 +599,9 @@ def render_report(report: DailyReport) -> str:
         row.get("submitted") == 1 for row in report.semester_assignments
     )
     term_assignment_remaining = len(_remaining_assignments(report))
+    term_assignment_not_required = sum(
+        not is_submission_required(row) for row in report.semester_assignments
+    )
     lines = [
         f"[yonstudy 일일 리포트] {report.target.isoformat()} (KST)",
         f"대상: {report.year} {report.semester}",
@@ -590,7 +610,7 @@ def render_report(report: DailyReport) -> str:
         f"학기 요약: 영상 {term_video_total}개 (완료 {term_video_done} · "
         f"남음 {term_video_remaining} · 공개 예정 {term_video_upcoming}) · "
         f"제출 활동 {len(report.semester_assignments)}개 (제출 {term_assignment_done} · "
-        f"현재 미제출 {term_assignment_remaining})",
+        f"현재 미제출 {term_assignment_remaining} · 본인 제출 불필요 {term_assignment_not_required})",
         f"오늘 요약: 할 일 {len(report.todos)} (긴급/지각 {urgent}) · "
         f"오늘 일정 {len(report.today_schedule)} · 시청 대기 {len(report.viewing_queue)} · "
         f"새 글 {len(report.new_posts)} · 새 자료 {len(report.new_files)} · "
@@ -671,6 +691,8 @@ def render_report(report: DailyReport) -> str:
     lines += [
         f"- [{_assignment_term_status(r, report.target)}] [{r['course_name']}] "
         f"{r.get('section_name') or ''} · {r['title']}"
+        + (f" · {r['submission_reason']}"
+           if not is_submission_required(r) and r.get("submission_reason") else "")
         + (f" · 마감 {str(r.get('due_at') or r.get('open_to'))[:16]}"
            if r.get("due_at") or r.get("open_to") else "")
         + (f" · {r['url']}" if r.get("url") else "")
@@ -719,6 +741,7 @@ def render_report(report: DailyReport) -> str:
     lines += [
         f"- {r['course_name']}: 확인된 완료 {r['effective_done']}, "
         f"현재 미완료 {r['effective_incomplete']}, 공개 예정 {r['upcoming']}, "
+        f"본인 제출 불필요 {r['not_required']}, "
         f"완료 체크 {r['done']}, "
         f"체크표시 없음 {r['untracked']} (별도 진도/제출 상태 있음 {r['alternate_state']}, "
         f"판단 신호 없음 {r['no_state']}) / 전체 {r['total']}"
@@ -775,6 +798,8 @@ def _video_remaining_minutes(row: dict) -> int | None:
 
 
 def _assignment_term_status(row: dict, target: date) -> str:
+    if not is_submission_required(row):
+        return submission_requirement_label(row)
     if row.get("submitted") == 1:
         return "제출 완료"
     opens = _date_in(row.get("open_from"))
@@ -791,20 +816,23 @@ def _assignment_term_status(row: dict, target: date) -> str:
 def _remaining_assignments(report: DailyReport) -> list[dict]:
     return [
         row for row in report.semester_assignments
-        if row.get("submitted") == 0
+        if is_submission_required(row) and row.get("submitted") == 0
         and _assignment_term_status(row, report.target) != "공개 예정"
     ]
 
 
 def assignments_due_today(report: DailyReport) -> list[dict]:
-    """오늘 마감인 제출 활동을 제출 완료 항목까지 포함해 반환한다."""
+    """본인 제출이 필요한 오늘 마감 활동을 제출 완료 항목까지 포함해 반환한다."""
     return [
         row for row in report.semester_assignments
-        if _date_in(row.get("due_at") or row.get("open_to")) == report.target
+        if is_submission_required(row)
+        and _date_in(row.get("due_at") or row.get("open_to")) == report.target
     ]
 
 
 def assignment_submission_label(row: dict) -> str:
+    if not is_submission_required(row):
+        return submission_requirement_label(row)
     if row.get("submitted") == 1:
         return "제출 완료"
     if row.get("submitted") == 0:
@@ -821,6 +849,8 @@ def _upcoming_releases(report: DailyReport, horizon_days: int = 14) -> list[dict
         (report.semester_assignments, "과제"),
     ):
         for source in rows:
+            if not is_submission_required(source):
+                continue
             opens = _date_in(source.get("open_from"))
             if not opens or opens <= report.target or opens > horizon:
                 continue
@@ -898,6 +928,9 @@ def render_email_text(report: DailyReport) -> str:
     term_assignment_done = sum(
         row.get("submitted") == 1 for row in report.semester_assignments
     )
+    term_assignment_not_required = sum(
+        not is_submission_required(row) for row in report.semester_assignments
+    )
     lines = [
         f"{report.target.month}월 {report.target.day}일 런어스 요약",
         f"{report.year}년 {report.semester}",
@@ -905,7 +938,8 @@ def render_email_text(report: DailyReport) -> str:
         f"이번 학기 영상 {term_video_total}개 · 완료 {term_video_done}개 · "
         f"현재 남은 영상 {term_video_remaining}개 · 공개 예정 {term_video_upcoming}개",
         f"이번 학기 제출 활동 {len(report.semester_assignments)}개 · "
-        f"제출 {term_assignment_done}개 · 현재 미제출 {len(remaining_assignments)}개",
+        f"제출 {term_assignment_done}개 · 현재 미제출 {len(remaining_assignments)}개 · "
+        f"본인 제출 불필요 {term_assignment_not_required}개",
         f"오늘 일정 {len(report.today_schedule)}개 · 새 소식 "
         f"{len(report.new_posts) + len(report.new_files)}개",
     ]
@@ -1009,6 +1043,9 @@ def render_report_html(report: DailyReport) -> str:
     unknown_assignments = sum(
         _assignment_term_status(row, report.target) == "제출 상태 미확인"
         for row in report.semester_assignments
+    )
+    not_required_assignments = sum(
+        not is_submission_required(row) for row in report.semester_assignments
     )
 
     def link(url: str | None, label: str = "LearnUs에서 보기") -> str:
@@ -1149,6 +1186,11 @@ def render_report_html(report: DailyReport) -> str:
         f"제출 상태 미확인 과제 {unknown_assignments}개 · LearnUs에서 확인이 필요합니다."
         if unknown_assignments else ""
     )
+    if not_required_assignments:
+        assignment_note += (
+            (" " if assignment_note else "")
+            + f"본인 제출 불필요 {not_required_assignments}개는 남은 항목과 마감 알림에서 제외했습니다."
+        )
     if todo_parts:
         rows.append(section("현재 남은 항목", "".join(todo_parts), assignment_note))
     else:

@@ -38,16 +38,32 @@ sudo docker compose up -d
 sudo docker compose ps
 ```
 
-To create missing subtitles on the NAS CPU, set the transcription variables in
-`deploy/synology.env.example` to the target semester and enable the optional
-profile. The transcriber is separate from the scheduler, so its image and model
-are not downloaded unless the profile is enabled. Its `/models` bind mount
-preserves the model cache across container replacements.
+Transcription has its own `compose.transcription.yaml`, independent from the
+scheduler. Copy `deploy/transcription.env.example` to a private env file. Select
+`COMPOSE_PROFILES=local` to mount a semester folder directly on a NAS or workstation.
+Select `COMPOSE_PROFILES=remote` on a compute host to stage media through rclone and
+upload only reviewed subtitles, reports, state and exact old-subtitle backups.
 
 ```bash
-sudo docker compose --profile transcription up -d --build transcriber
-sudo docker compose logs -f transcriber
+cp deploy/transcription.env.example ~/.yonstudy/transcription.env
+chmod 600 ~/.yonstudy/transcription.env
+$EDITOR ~/.yonstudy/transcription.env
+sudo docker compose --env-file ~/.yonstudy/transcription.env \
+  -f compose.transcription.yaml up -d --build
+sudo docker compose --env-file ~/.yonstudy/transcription.env \
+  -f compose.transcription.yaml logs -f
 ```
+
+The local profile defaults to small/int8, two CPU threads and 2 GB. The remote
+profile defaults to large-v3-turbo/int8, 12 CPU threads and 7 GB. Both keep model
+cache, queue state and backups in host directories across image replacement. Read
+`<archive>/<semester>/전사_현황.md` for progress. The heartbeat health check stays
+active during long jobs. Suspect subtitles are processed before missing recordings
+and videos, and a failed file does not stall the remaining queue.
+
+An LXC without nested Docker can run `systemd/yonstudy-remote-transcribe.service`
+directly with the same remote environment variables. Media decoding and ASR then
+consume only that LXC's CPU and RAM. `--update` uploads preserve a newer NAS-side edit.
 
 To enable recording classification, copy `deploy/timetable.toml.example` to
 `config/timetable.toml`, replace its course IDs with values from `courses`, and

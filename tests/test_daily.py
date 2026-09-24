@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 from yonstudy.daily import (
-    SEOUL, build_daily_report, current_term, render_email_text,
+    SEOUL, assignments_due_today, build_daily_report, current_term, render_email_text,
     render_report, render_report_html, send_report,
 )
 from yonstudy.store import Store
@@ -454,6 +454,90 @@ class DailyReportTests(unittest.TestCase):
                 self.assertIn("제출 상태 미확인 과제 1개", render(unknown_only))
         full_body = render_report(report)
         self.assertRegex(full_body, r"\[제출 상태 미확인\] \[테스트과목\].*이전 주차 외부 과제")
+
+    def test_team_submission_exemption_keeps_remote_state_without_pending_counts(self):
+        day = self.today.isoformat()
+        for cmid, title in ((30, "팀 보고서"), (31, "개인 과제")):
+            row = self.activity("n")
+            row.update(cmid=cmid, modname="assign", title=title)
+            self.store.save_activity(row)
+            self.store.save_submission({
+                "cmid": cmid, "course_id": 1, "modname": "assign", "title": title,
+                "submitted": 0, "due_at": f"{day} 23:59:59",
+            })
+        self.store.set_assignment_requirement(30, "not_required", "팀 대표가 제출")
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+        for rows in (report.todos, report.assignments, report.today_schedule,
+                     assignments_due_today(report)):
+            self.assertEqual([row["cmid"] for row in rows], [31])
+        team = next(row for row in report.semester_assignments if row["cmid"] == 30)
+        self.assertEqual((team["submitted"], team["completion"]), (0, "n"))
+        counts = report.completion_by_course[0]
+        self.assertEqual((counts["incomplete"], counts["effective_incomplete"]), (1, 1))
+        self.assertEqual((counts["done"], counts["effective_done"], counts["not_required"]), (0, 0, 1))
+        self.assertEqual(report.completed, [])
+        full_body = render_report(report)
+        self.assertRegex(full_body, r"\[본인 제출 불필요\] \[테스트과목\].*팀 보고서 · 팀 대표가 제출")
+        self.assertNotIn("팀 보고서 · 미제출", full_body)
+        for render in (render_email_text, render_report_html):
+            body = render(report)
+            self.assertIn("본인 제출 불필요 1개", body)
+            self.assertIn("오늘 마감 과제 (1개)", body)
+        self.assertIn("제출 0개 · 현재 미제출 1개", render_email_text(report))
+
+        # Subsequent remote refreshes retain the explicit preference.
+        self.store.save_submission({"cmid": 30, "submitted": 0})
+        self.store.commit()
+        self.assertEqual([row["cmid"] for row in build_daily_report(
+            self.store, target=self.today
+        ).todos], [31])
+
+        self.store.set_assignment_requirement(30, "auto")
+        self.store.commit()
+        resumed = build_daily_report(self.store, target=self.today)
+        self.assertEqual({row["cmid"] for row in resumed.todos}, {30, 31})
+        self.assertEqual(resumed.completion_by_course[0]["effective_incomplete"], 2)
+        self.assertEqual(resumed.completion_by_course[0]["not_required"], 0)
+
+    def test_exempt_unknown_assignment_is_not_an_unknown_submission_warning(self):
+        row = self.activity("n")
+        row.update(cmid=30, modname="lti", title="대표 제출 외부 과제")
+        self.store.save_activity(row)
+        self.store.save_submission({
+            "cmid": 30, "course_id": 1, "modname": "lti", "title": row["title"],
+            "submitted": None, "due_at": f"{self.today.isoformat()} 23:59:59",
+        })
+        self.store.set_assignment_requirement(30, "not_required", "대표 제출")
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+        self.assertEqual(report.todos, [])
+        self.assertEqual(report.today_schedule, [])
+        self.assertEqual(assignments_due_today(report), [])
+        self.assertEqual(report.completion_by_course[0]["effective_incomplete"], 0)
+        for render in (render_email_text, render_report_html):
+            body = render(report)
+            self.assertNotIn("제출 상태 미확인 과제", body)
+            self.assertIn("본인 제출 불필요 1개", body)
+
+    def test_exempt_upcoming_assignment_remains_in_semester_listing_only(self):
+        tomorrow = (self.today + timedelta(days=1)).isoformat()
+        row = self.activity("n")
+        row.update(cmid=30, modname="assign", title="다음 팀 과제", open_from=f"{tomorrow} 09:00")
+        self.store.save_activity(row)
+        self.store.save_submission({
+            "cmid": 30, "course_id": 1, "modname": "assign", "title": row["title"],
+            "submitted": 0, "due_at": f"{tomorrow} 23:59",
+        })
+        self.store.set_assignment_requirement(30, "not_required", "대표 제출")
+        self.store.commit()
+        report = build_daily_report(self.store, target=self.today)
+        self.assertEqual(len(report.semester_assignments), 1)
+        for render in (render_email_text, render_report_html):
+            self.assertNotIn("14일 이내 공개 예정", render(report))
+        self.assertRegex(render_report(report), r"\[본인 제출 불필요\].*다음 팀 과제 · 대표 제출")
 
     @patch("yonstudy.daily.Path.exists", return_value=True)
     @patch("yonstudy.daily.subprocess.run")

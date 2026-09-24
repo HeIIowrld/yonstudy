@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import cli
 from yonstudy.archive import Archiver
+from yonstudy.html_content import find_elements
 from yonstudy.onedrive import RcloneOneDrive
 from yonstudy.remote import RemoteStorageError, RcloneRemote, sync_remote_tree
 from yonstudy.store import Store
@@ -112,6 +113,7 @@ class RcloneRemoteTests(unittest.TestCase):
 
             def __init__(self):
                 self.files = {}
+                self.forced = set()
 
             def exists(self, relative, size=None):
                 body = self.files.get(relative)
@@ -126,6 +128,8 @@ class RcloneRemoteTests(unittest.TestCase):
 
             def upload_bytes(self, relative, body, force=False):
                 self.files[relative] = body
+                if force:
+                    self.forced.add(relative)
                 return True
 
         with tempfile.TemporaryDirectory() as root:
@@ -149,6 +153,10 @@ class RcloneRemoteTests(unittest.TestCase):
                 "instructions_html": "<h2>Goal</h2><p>직접 AI를 실험한다.</p>",
                 "submitted": 0,
             })
+            store.db.execute(
+                "INSERT INTO assignment_preference(cmid,requirement,reason,updated_at) VALUES (?,?,?,?)",
+                (10, "not_required", "팀장이 대표 제출", "2026-09-22T12:00:00"),
+            )
             store.commit()
 
             remote = MemoryRemote()
@@ -167,7 +175,16 @@ class RcloneRemoteTests(unittest.TestCase):
             ).decode("utf-8")
             self.assertIn("직접 AI를 실험한다.", markdown)
             self.assertIn("2026-09-15 23:59", markdown)
-            self.assertIn("<h2>Goal</h2>", html)
+            self.assertIn("Goal", [node.text() for node in find_elements(html, lambda tag, attrs: tag == "h2")])
+            self.assertIn("본인 제출 불필요", html)
+            self.assertIn("LearnUs 상태: 미제출", html)
+            self.assertEqual(result.assignment_indexes, 2)
+            term_index = "2026-2/과제목록.html"
+            course_index = "2026-2/AIC2120_인공지능개론/과제자료/index.html"
+            self.assertIn(term_index, remote.forced)
+            self.assertIn(course_index, remote.forced)
+            self.assertIn("본인 제출 불필요", remote.files[term_index].decode())
+            self.assertIn("과제 읽기 목록", remote.files["2026-2/AIC2120_인공지능개론/강좌정보.md"].decode())
 
     def test_withdrawn_course_is_skipped_but_classmate_attachment_is_kept(self):
         class MemoryRemote:

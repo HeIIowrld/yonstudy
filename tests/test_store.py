@@ -117,6 +117,39 @@ class StoreMigrationTests(unittest.TestCase):
             self.assertIn("instructions_html", columns)
 
 
+class AssignmentPreferenceTests(unittest.TestCase):
+    def test_preference_survives_crawl_and_reopen_without_faking_submission(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_activity({"cmid": 10, "course_id": 1, "modname": "assign", "title": "팀과제", "completion": "n"})
+            store.save_submission({"cmid": 10, "course_id": 1, "modname": "assign", "title": "팀과제", "submitted": 0, "status": "제출 안 함"})
+            store.set_assignment_requirement(10, "not_required", "팀 대표자가 제출")
+            store.save_submission({"cmid": 10, "submitted": 0, "status": "제출 안 함"})
+            store.save_activity({"cmid": 10, "completion": "n"})
+            store.commit()
+            store.db.close()
+            reopened = Store(root)
+            preference = reopened.query("SELECT * FROM assignment_preference WHERE cmid=10")[0]
+            self.assertEqual(preference["requirement"], "not_required")
+            self.assertEqual(preference["reason"], "팀 대표자가 제출")
+            self.assertEqual(reopened.query("SELECT submitted FROM submission WHERE cmid=10")[0][0], 0)
+            self.assertEqual(reopened.query("SELECT completion FROM activity WHERE cmid=10")[0][0], "n")
+            self.assertEqual(reopened.query("SELECT * FROM change_event WHERE kind='submission_completed'"), [])
+            reopened.set_assignment_requirement(10, "auto")
+            self.assertEqual(reopened.query("SELECT * FROM assignment_preference"), [])
+            self.assertEqual(reopened.query("SELECT submitted FROM submission WHERE cmid=10")[0][0], 0)
+
+    def test_unknown_activity_video_and_invalid_requirement_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_activity({"cmid": 10, "modname": "vod", "title": "강의"})
+            for cmid, requirement in ((99, "not_required"), (10, "not_required"), (10, "done")):
+                with self.subTest(cmid=cmid, requirement=requirement):
+                    with self.assertRaises(ValueError):
+                        store.set_assignment_requirement(cmid, requirement)
+            self.assertEqual(store.query("SELECT * FROM assignment_preference"), [])
+
+
 class VodCompletionEventTests(unittest.TestCase):
     def test_completion_event_waits_for_max_position(self):
         with tempfile.TemporaryDirectory() as root:

@@ -1,12 +1,18 @@
+import html
+import re
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import unquote
 
 import cli
-from yonstudy.export import export_onedrive_tree, term_folder
+from yonstudy.export import (
+    export_onedrive_tree, render_assignment_html, render_assignments_index, term_folder,
+)
 from yonstudy.store import Store
+from yonstudy.html_content import find_elements
 
 
 class OneDriveExportTests(unittest.TestCase):
@@ -131,6 +137,87 @@ class OneDriveExportTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue((Path(self.out.name) / "2025-2" / "OLD1000_이전과목").is_dir())
         self.assertTrue((Path(self.out.name) / "2026-2" / "TST1000_테스트과목").is_dir())
+
+    def test_assignment_reading_indexes_link_to_existing_html_and_keep_personal_status(self):
+        self.store.save_activity({
+            "cmid": 12, "course_id": 1, "modname": "assign",
+            "title": "Team #1", "section_idx": 2, "section_name": "2주차",
+            "url": "https://example.test/assignment/12",
+        })
+        self.store.save_submission({
+            "cmid": 12, "course_id": 1, "modname": "assign", "title": "Team #1",
+            "status": "미제출", "submitted": 0, "instructions": "## Instructions\n\n- Read the notebook.",
+        })
+        self.store.db.execute(
+            "INSERT INTO assignment_preference(cmid,requirement,reason,updated_at) VALUES (?,?,?,?)",
+            (12, "not_required", "팀장이 대표 제출", "2026-09-22T12:00:00"),
+        )
+        self.store.commit()
+        result = export_onedrive_tree(self.store, self.out.name, year="2026", semester="2학기")
+        self.assertEqual(result.assignment_specs, 1)
+        self.assertEqual(result.assignment_indexes, 2)
+        root = Path(self.out.name)
+        term_index = root / "2026-2" / "과제목록.html"
+        index_html = term_index.read_text()
+        self.assertIn("본인 제출 불필요", index_html)
+        self.assertIn("LearnUs 상태: 미제출", index_html)
+        links = re.findall('href="([^"]+)"', index_html)
+        self.assertTrue(links[0].endswith(".html"))
+        for link in links:
+            self.assertTrue((term_index.parent / unquote(html.unescape(link))).is_file(), link)
+        doc = (term_index.parent / unquote(html.unescape(links[0]))).read_text()
+        self.assertIn("Instructions", [node.text() for node in find_elements(doc, lambda tag, attrs: tag == "h2")])
+        self.assertIn("팀장이 대표 제출", doc)
+        self.assertIn('href="../index.html"', doc)
+        course_index = next(root.rglob("강좌정보.md")).read_text()
+        self.assertIn("본인 제출 불필요", course_index)
+        self.assertIn("LearnUs: 미제출", course_index)
+        second = export_onedrive_tree(self.store, self.out.name, year="2026", semester="2학기")
+        self.assertEqual(second.copied_files, 0)
+
+    def test_cached_notebook_html_gets_readable_structure_without_resync(self):
+        source = "## What you have to do\n\n- Complete **TODO**.\n- Submit the notebook."
+        rendered = render_assignment_html({"title": "AI"}, {
+            "title": "Assignment 2", "instructions_html": '<pre class="notebook-markdown">' + html.escape(source) + '</pre>',
+        }).decode()
+        self.assertIn("What you have to do", [node.text() for node in find_elements(rendered, lambda tag, attrs: tag == "h2")])
+        self.assertIn("<strong>TODO</strong>", rendered)
+        self.assertIn('<meta name="viewport"', rendered)
+        self.assertIn("@media print", rendered)
+        self.assertNotIn('<pre class="notebook-markdown">', rendered)
+
+    def test_reading_index_escapes_titles_and_filename_delimiters(self):
+        rendered = render_assignments_index([{
+            "title": '<img src=x onerror="bad">', "html_path": "Team #1/task?.html",
+            "markdown_path": "Team #1/task?.md",
+        }]).decode()
+        self.assertIn('href="Team%20%231/task%3F.html"', rendered)
+        self.assertNotIn("<img", rendered)
+        self.assertIn("&lt;img", rendered)
+
+    def test_legacy_oj_description_is_rendered_as_problems_with_navigation(self):
+        source = ('## Yonsei-OJ 상세 명세\n\n### OJ-1. Factorial\n\n'
+                  '#### Problem\n\nCompute `n!`.\n\n#### Example\n\n'
+                  '```\n5\n120\n```\n\n#### Skeleton code\n\n'
+                  '```python\ndef factorial(n):\n    pass\n```')
+        rendered = render_assignment_html({"title": "자료구조"}, {
+            "title": "Recursion", "instructions_html": '<h2>Yonsei-OJ 상세 명세</h2><pre>' + html.escape(source) + '</pre>',
+        }).decode()
+        headings = find_elements(rendered, lambda tag, attrs: tag in {"h2", "h3", "h4"})
+        self.assertEqual([node.text() for node in headings], ["Yonsei-OJ 상세 명세", "OJ-1. Factorial", "Problem", "Example", "Skeleton code"])
+        code = find_elements(rendered, lambda tag, attrs: tag == "pre")
+        self.assertEqual([node.text() for node in code], ["5\n120", "def factorial(n):\n    pass"])
+        targets = {node.attrs["id"] for node in find_elements(rendered, lambda tag, attrs: bool(attrs.get("id")))}
+        links = find_elements(rendered, lambda tag, attrs: tag == "a" and (attrs.get("href") or "").startswith("#"))
+        self.assertEqual(len(links), 2)
+        self.assertTrue(all(link.attrs["href"][1:] in targets for link in links))
+
+    def test_regular_code_is_not_interpreted_as_legacy_oj_document(self):
+        sample = '## Just a comment\nprint("hello")\n    keep_spacing = 1'
+        rendered = render_assignment_html({"title": "자료구조"}, {
+            "title": "Arrays", "instructions_html": '<pre>' + html.escape(sample) + '</pre>',
+        }).decode()
+        self.assertEqual(find_elements(rendered, lambda tag, attrs: tag == "pre")[0].text(), sample)
 
 
 if __name__ == "__main__":

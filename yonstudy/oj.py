@@ -13,7 +13,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from .client import UA, parse_input_tags
+from .html_content import Element, clean_html, find_elements, html_to_markdown
 from .lti import LtiAssignment
+from .markdown_view import markdown_to_html
 
 
 OJ_ORIGIN = "https://yonsei-oj.duckdns.org:508"
@@ -38,6 +40,7 @@ class OjProblem:
     memory_limit: str | None
     languages: list[str]
     statement: str
+    statement_html: str = ""
 
 
 @dataclass
@@ -72,90 +75,13 @@ class _LinkParser(HTMLParser):
             self._text = []
 
 
-class _MarkdownParser(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._pre = False
-        self._inline_code = False
-        self._line_start = True
-
-    def _break(self, count: int = 1) -> None:
-        current = "".join(self.parts)
-        missing = count - (len(current) - len(current.rstrip("\n")))
-        if missing > 0:
-            self.parts.append("\n" * missing)
-        self._line_start = True
-
-    def handle_starttag(self, tag, _attrs):
-        tag = tag.lower()
-        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            self._break(2)
-            # 문제 하나가 통합 명세의 3단계 제목이므로
-            # 본문 소제목은 그 아래에 둔다.
-            self.parts.append("#### ")
-            self._line_start = False
-        elif tag == "p":
-            self._break(2)
-        elif tag == "li":
-            self._break(1)
-            self.parts.append("- ")
-            self._line_start = False
-        elif tag == "br":
-            self._break(1)
-        elif tag == "pre":
-            self._break(2)
-            self.parts.append("```python\n")
-            self._pre = True
-            self._line_start = True
-        elif tag == "code" and not self._pre:
-            if self.parts and not self.parts[-1].endswith((" ", "\n")):
-                self.parts.append(" ")
-            self.parts.append("`")
-            self._inline_code = True
-
-    def handle_endtag(self, tag):
-        tag = tag.lower()
-        if tag in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li"}:
-            self._break(2 if tag != "li" else 1)
-        elif tag == "pre":
-            self._break(1)
-            self.parts.append("```\n")
-            self._pre = False
-            self._line_start = True
-        elif tag == "code" and not self._pre:
-            self.parts.append("`")
-            self._inline_code = False
-
-    def handle_data(self, data):
-        if self._pre:
-            self.parts.append(data)
-            return
-        value = re.sub(r"\s+", " ", data)
-        if not value.strip():
-            return
-        stripped = value.strip()
-        if (
-            not self._line_start
-            and not self._inline_code
-            and self.parts
-            and not self.parts[-1].endswith((" ", "\n"))
-            and stripped[0] not in ".,;:!?)]}"
-        ):
-            self.parts.append(" ")
-        self.parts.append(stripped)
-        self._line_start = False
-
-    def markdown(self) -> str:
-        value = "".join(self.parts)
-        value = re.sub(r"[ \t]+\n", "\n", value)
-        value = re.sub(r"\n{3,}", "\n\n", value)
-        return value.strip()
-
-
 def _plain(value: str) -> str:
     value = re.sub(r"<[^>]+>", " ", value)
     return re.sub(r"\s+", " ", html_mod.unescape(value)).strip()
+
+
+def _has_class(attrs: dict, name: str) -> bool:
+    return name in (attrs.get("class") or "").split()
 
 
 def _links(page: str) -> list[tuple[str, str]]:
@@ -165,50 +91,93 @@ def _links(page: str) -> list[tuple[str, str]]:
     return parser.links
 
 
-def parse_problem(page: str, source_url: str) -> OjProblem:
-    title_match = re.search(
-        r'<div class="problem-title">.*?<h2[^>]*>(.*?)</h2>', page, re.I | re.S
+def _statement_fragment(description: Element) -> str:
+    # Some DMOJ themes mark the statement; Yonsei's current theme uses an
+    # anonymous div followed by a separator and a clarification action.
+    bodies = description.find_all(
+        lambda _tag, attrs: _has_class(attrs, "content-text")
+        or _has_class(attrs, "problem-statement")
     )
+    if bodies:
+        return bodies[0].inner_html()
+    for index, child in enumerate(description.children):
+        if not isinstance(child, Element):
+            continue
+        if (
+            _has_class(child.attrs, "clarify")
+            or _has_class(child.attrs, "problem-actions")
+            or (child.tag == "a" and re.search(r"/tickets/new/?(?:[?#].*)?$", child.attrs.get("href") or ""))
+        ):
+            children = description.children[:index]
+            while children and (
+                isinstance(children[-1], str) and not children[-1].strip()
+                or isinstance(children[-1], Element) and children[-1].tag == "hr"
+            ):
+                children.pop()
+            return Element("", children=children).inner_html()
+    return description.inner_html()
+
+
+def _statement_headings(fragment: str) -> str:
+    headings = find_elements(fragment, lambda tag, _attrs: bool(re.fullmatch(r"h[1-6]", tag)))
+    if not headings:
+        return fragment
+    # Each problem has an h3 in the combined assignment. Keep the relative
+    # statement hierarchy underneath it, including sites that start with h5.
+    offset = 4 - min(int(heading.tag[1]) for heading in headings)
+    return re.sub(
+        r"(<\s*/?\s*h)([1-6])(?=[\s>])",
+        lambda match: match.group(1) + str(min(6, int(match.group(2)) + offset)),
+        fragment,
+        flags=re.I,
+    )
+
+
+def parse_problem(page: str, source_url: str) -> OjProblem:
+    titles = find_elements(page, lambda _tag, attrs: _has_class(attrs, "problem-title"))
+    headings = titles[0].find_all(lambda tag, _attrs: tag == "h2") if titles else []
     code_match = re.search(r"/problem/([^/?#]+)", source_url)
-    if not title_match or not code_match:
+    if not headings or not code_match:
         raise OjArchiveError("Yonsei-OJ 문제 제목 또는 코드를 찾지 못했습니다")
 
     info: dict[str, str] = {}
-    for key, value in re.findall(
-        r'class="pi-name">(.*?)</span>\s*<span class="pi-value">(.*?)</span>',
-        page,
-        re.I | re.S,
-    ):
-        info[_plain(key).rstrip(":").lower()] = _plain(value)
+    entries = find_elements(page, lambda _tag, attrs: _has_class(attrs, "problem-info-entry"))
+    for entry in entries:
+        names = entry.find_all(lambda _tag, attrs: _has_class(attrs, "pi-name"))
+        values = entry.find_all(lambda _tag, attrs: _has_class(attrs, "pi-value"))
+        if names and values:
+            info[_plain(names[0].inner_html()).rstrip(":").lower()] = _plain(values[0].inner_html())
 
-    allowed = re.search(
-        r'id="allowed-langs".*?<div class="toggled">(.*?)</div>', page, re.I | re.S
-    )
-    languages = []
+    allowed = find_elements(page, lambda _tag, attrs: attrs.get("id") == "allowed-langs")
+    languages: list[str] = []
     if allowed:
-        languages = [x.strip() for x in _plain(allowed.group(1)).split(",") if x.strip()]
+        toggled = allowed[0].find_all(lambda _tag, attrs: _has_class(attrs, "toggled"))
+        if toggled:
+            languages = [x.strip() for x in _plain(toggled[0].inner_html()).split(",") if x.strip()]
 
-    description = re.search(
-        r'<div class="content-description screen">(.*?)<hr>', page, re.I | re.S
+    descriptions = find_elements(
+        page, lambda _tag, attrs: _has_class(attrs, "content-description")
     )
-    if not description:
+    if not descriptions:
         raise OjArchiveError("Yonsei-OJ 문제 본문을 찾지 못했습니다")
-    parser = _MarkdownParser()
-    parser.feed(description.group(1))
-    parser.close()
-    statement = parser.markdown()
+    description = next(
+        (item for item in descriptions if _has_class(item.attrs, "screen")), descriptions[0]
+    )
+    statement_html = clean_html(_statement_headings(_statement_fragment(description)), source_url)
+    statement = html_to_markdown(statement_html, source_url)
     if not statement:
         raise OjArchiveError("Yonsei-OJ 문제 본문이 비어 있습니다")
 
     return OjProblem(
         code=code_match.group(1),
-        title=_plain(title_match.group(1)),
+        title=_plain(headings[0].inner_html()),
         url=source_url,
         points=info.get("points"),
         time_limit=info.get("time limit"),
         memory_limit=info.get("memory limit"),
         languages=languages,
         statement=statement,
+        statement_html=statement_html,
     )
 
 
@@ -395,6 +364,31 @@ def render_contest_markdown(contest: OjContest) -> str:
     return "\n".join(lines).strip()
 
 
+def render_contest_html(contest: OjContest) -> str:
+    escape = html_mod.escape
+    lines = [
+        "<h2>Yonsei-OJ 상세 명세</h2>",
+        "<ul>",
+        f"<li>콘테스트: {escape(contest.title)}</li>",
+        f"<li>문제 수: {len(contest.problems)}</li>",
+        f'<li>원문: <a href="{escape(contest.url)}">{escape(contest.url)}</a></li>',
+        "</ul>",
+    ]
+    for number, problem in enumerate(contest.problems, 1):
+        lines.extend([
+            f"<h3>OJ-{number}. {escape(problem.title)} (<code>{escape(problem.code)}</code>)</h3>",
+            "<ul>",
+            f"<li>배점: {escape(problem.points or '알 수 없음')}</li>",
+            f"<li>시간 제한: {escape(problem.time_limit or '알 수 없음')}</li>",
+            f"<li>메모리 제한: {escape(problem.memory_limit or '알 수 없음')}</li>",
+            f"<li>허용 언어: {escape(', '.join(problem.languages) or '알 수 없음')}</li>",
+            f'<li>원문: <a href="{escape(problem.url)}">{escape(problem.url)}</a></li>',
+            "</ul>",
+            problem.statement_html or markdown_to_html(problem.statement, problem.url),
+        ])
+    return clean_html("\n".join(lines), contest.url)
+
+
 def enrich_with_yonsei_oj(
     assignment: LtiAssignment,
     activity_title: str,
@@ -410,13 +404,11 @@ def enrich_with_yonsei_oj(
         auto_join=auto_join,
     )
     markdown = render_contest_markdown(contest)
-    escaped = html_mod.escape(markdown)
     return replace(
         assignment,
         instructions=f"{assignment.instructions}\n\n{markdown}".strip(),
         instructions_html=(
-            f"{assignment.instructions_html}\n<h2>Yonsei-OJ 상세 명세</h2>"
-            f"<pre>{escaped}</pre>"
+            f"{assignment.instructions_html}\n{render_contest_html(contest)}"
         ),
     ), contest
 
@@ -430,5 +422,6 @@ __all__ = [
     "YonseiOjClient",
     "enrich_with_yonsei_oj",
     "parse_problem",
+    "render_contest_html",
     "render_contest_markdown",
 ]

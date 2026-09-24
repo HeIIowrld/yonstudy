@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS submission (
     instructions_html TEXT
 );
 
+-- 재수집으로 덮이지 않도록 개인 제출 필요 여부는 사이트 상태와 분리한다.
+-- 행이 없으면 자동 판정. not_required는 직접 지정한 과제에만 적용한다.
+CREATE TABLE IF NOT EXISTS assignment_preference (
+    cmid INTEGER PRIMARY KEY,
+    requirement TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- 첨부/제출/자료 파일. content는 blobs/ 아래에 sha256으로 저장.
 CREATE TABLE IF NOT EXISTS file (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -581,6 +590,41 @@ class Store:
                 row.get("title"), "0", "1", {"modname": row.get("modname")},
             )
         self._upsert("submission", "cmid", row)
+
+    def set_assignment_requirement(
+        self, cmid: int, requirement: str, reason: str = "",
+    ) -> None:
+        """과제의 개인 제출 필요 여부를 지정하거나 자동 판정으로 되돌린다."""
+        if requirement not in {"not_required", "auto"}:
+            raise ValueError("제출 필요 여부는 not_required 또는 auto여야 합니다")
+        row = self.db.execute(
+            "SELECT cmid,course_id,modname,title FROM submission WHERE cmid=?", (cmid,),
+        ).fetchone()
+        if row is None:
+            row = self.db.execute(
+                "SELECT cmid,course_id,modname,title FROM activity WHERE cmid=?", (cmid,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"과제 {cmid}를 찾지 못했습니다")
+        if row["modname"] not in {"assign", "turnitintooltwo", "vpl", "lti", "quiz", "feedback", "choice"}:
+            raise ValueError(f"활동 {cmid}는 제출형 과제가 아닙니다")
+        reason = reason.strip()
+        old = self.db.execute(
+            "SELECT requirement,reason FROM assignment_preference WHERE cmid=?", (cmid,),
+        ).fetchone()
+        old_requirement = old["requirement"] if old else "auto"
+        if requirement == "auto":
+            self.db.execute("DELETE FROM assignment_preference WHERE cmid=?", (cmid,))
+        else:
+            self._upsert("assignment_preference", "cmid", {
+                "cmid": cmid, "requirement": requirement,
+                "reason": reason, "updated_at": _now(),
+            })
+        if old_requirement != requirement or (requirement != "auto" and old and old["reason"] != reason):
+            self.record_change(
+                "assignment_requirement_changed", row["course_id"], cmid, row["title"],
+                old_requirement, requirement, {"reason": reason},
+            )
 
     def record_change(
         self,

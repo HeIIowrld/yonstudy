@@ -9,6 +9,76 @@ from yonstudy.archive import (
 )
 from yonstudy.parse import Activity, Course, Post, ProgressRow, parse_direct_course
 from yonstudy.store import Store
+from yonstudy.lti import LtiAssignment, LtiArchiveError
+from yonstudy.oj import OjArchiveError
+
+
+class AssignmentContentTests(unittest.TestCase):
+    def test_optional_attachment_failure_keeps_fresh_submission(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            arc = Archiver(None, store, verbose=False)
+            course = SimpleNamespace(course_id=1, url="https://ys.learnus.org/course/view.php?id=1")
+            activity = SimpleNamespace(cmid=10, modname="assign", title="Task", url="https://ys.learnus.org/mod/assign/view.php?id=10")
+            page = '<div id="intro"><p>Complete the analysis.</p><a href="/pluginfile.php/1/mod_assign/introattachment/data.csv">Data</a></div><table><tr><td>Submission status</td><td>Submitted for grading</td></tr></table>'
+            with patch.object(arc, "_request", return_value=page), patch.object(arc, "_fetch_file", side_effect=RuntimeError("upload failed")):
+                with self.assertRaises(RuntimeError):
+                    arc._sync_submission(course, activity, "unused", True)
+            row = store.query("SELECT * FROM submission WHERE cmid=10")[0]
+            self.assertIn("Complete the analysis", row["instructions"])
+            self.assertEqual(row["submitted"], 1)
+
+    def test_cached_teacher_notebook_is_included_without_downloading_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            arc = Archiver(None, store, verbose=False)
+            url = "https://ys.learnus.org/pluginfile.php/1/mod_assign/introattachment/task.ipynb"
+            body = json.dumps({"nbformat": 4, "cells": [
+                {"cell_type": "markdown", "source": ["# Detailed requirements\n", "Complete TODO 1." ]},
+                {"cell_type": "code", "source": "def solve():\n    pass", "outputs": [{"text": "private output"}]},
+            ]}).encode()
+            digest, size = store.put_blob(body)
+            store.save_file({"course_id": 1, "cmid": 10, "role": "introattachment", "url": url, "name": "task.ipynb", "sha256": digest, "bytes": size})
+            course = SimpleNamespace(course_id=1, url="https://ys.learnus.org/course/view.php?id=1")
+            activity = SimpleNamespace(cmid=10, modname="assign", title="Task", url="https://ys.learnus.org/mod/assign/view.php?id=10")
+            page = f'<div id="intro"><p>See notebook.</p></div><a href="{url}">task.ipynb</a>'
+            with patch.object(arc, "_request", return_value=page), patch.object(arc, "_get_bytes") as download:
+                arc._sync_submission(course, activity, "unused", False)
+                download.assert_not_called()
+            text = store.query("SELECT instructions FROM submission WHERE cmid=10")[0]["instructions"]
+            self.assertIn("Detailed requirements", text)
+            self.assertIn("    pass", text)
+            self.assertNotIn("private output", text)
+
+    def test_oj_failure_keeps_previous_specs_with_visible_warning(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_submission({
+                "cmid": 10, "course_id": 1, "title": "Task", "modname": "lti",
+                "instructions": "Old prompt\n\n## Yonsei-OJ 상세 명세\n\nSaved problem",
+                "instructions_html": "<p>Old prompt</p><h2>Yonsei-OJ 상세 명세</h2><p>Saved problem</p>",
+                "fields_json": json.dumps({"Provider": "Gradescope", "External provider": "Yonsei-OJ", "External problem count": "1"}),
+            })
+            assignment = LtiAssignment("Gradescope", "Task", "https://gradescope.com/", "New prompt", "<p>New prompt</p>", 1, "5")
+            with patch("yonstudy.archive.fetch_lti_assignment", return_value=assignment), patch("yonstudy.archive.enrich_with_yonsei_oj", side_effect=OjArchiveError("unavailable")):
+                Archiver(None, store, verbose=False)._sync_lti_assignment(SimpleNamespace(course_id=1), SimpleNamespace(cmid=10, title="Task"))
+            row = store.query("SELECT * FROM submission WHERE cmid=10")[0]
+            self.assertIn("New prompt", row["instructions"])
+            self.assertIn("Saved problem", row["instructions"])
+            fields = json.loads(row["fields_json"])
+            self.assertIn("이전 수집본 유지", fields["Collection warnings"][0])
+            self.assertEqual(fields["External problem count"], "1")
+
+    def test_unavailable_submitted_page_can_enrich_previously_saved_prompt(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_submission({"cmid": 10, "course_id": 1, "title": "Task", "modname": "lti", "instructions": "Saved public prompt", "fields_json": json.dumps({"Provider": "Gradescope", "Question count": "1"})})
+            with patch("yonstudy.archive.fetch_lti_assignment", side_effect=LtiArchiveError("closed")), patch("yonstudy.archive.enrich_with_leetcode", side_effect=lambda assignment: (assignment, [])) as enrich:
+                Archiver(None, store, verbose=False)._sync_lti_assignment(SimpleNamespace(course_id=1), SimpleNamespace(cmid=10, title="Task"))
+                self.assertEqual(enrich.call_args[0][0].instructions, "Saved public prompt")
+            row = store.query("SELECT * FROM submission WHERE cmid=10")[0]
+            self.assertIsNone(row["submitted"])
+            self.assertIn("이전 수집본", json.loads(row["fields_json"])["Collection warnings"][0])
 
 
 class ArchiveProgressTests(unittest.TestCase):

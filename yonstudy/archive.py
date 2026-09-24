@@ -7,12 +7,14 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 from . import parse as P
-from .lti import LtiArchiveError, fetch_lti_assignment
+from .lti import LtiAssignment, fetch_lti_assignment
+from .leetcode import enrich_with_leetcode
+from .notebook import MAX_NOTEBOOK_BYTES, parse_notebook_spec
 from .oj import OjArchiveError, enrich_with_yonsei_oj
 from .client import LEARNUS, LearnUsClient
 from .filename_normalization import nfc
@@ -467,6 +469,7 @@ class Archiver:
             return
         # VPL은 view.php가 아니라 제출 화면에 다운로드 링크가 있다.
         # view.php 안에 내 userid가 박혀 있으므로 그것으로 한 번 더 들어간다.
+        description_html = html
         if a.modname == "vpl":
             uid = P.find_user_id(html)
             if uid:
@@ -481,6 +484,13 @@ class Archiver:
                     self.s.log("vpl", str(a.cmid), False, str(exc))
 
         d = P.parse_submission(html, a.cmid, a.modname)
+        if a.modname == "vpl" and html != description_html:
+            description = P.parse_submission(description_html, a.cmid, a.modname)
+            if description.instructions:
+                d.instructions = description.instructions
+                d.instructions_html = description.instructions_html
+            known = {url for _, url in d.intro_files}
+            d.intro_files.extend((name, url) for name, url in description.intro_files if url not in known)
         f = d.fields
         first = lambda *keys: next((f[k] for k in keys if f.get(k)), None)  # noqa: E731
         self.s.save_submission(
@@ -503,6 +513,7 @@ class Archiver:
             f"    [{a.modname}] {a.title[:34]!r} — {mark}"
             + (f", 제출파일 {len(d.submitted_files)}개" if d.submitted_files else "")
         )
+
         if fetch_files:
             sub = f"submissions/{a.modname}"
             for name, url in d.submitted_files:
@@ -510,18 +521,59 @@ class Archiver:
             for name, url in d.intro_files:
                 self._fetch_file(course, a, url, name, "introattachment", cdir, sub)
 
+        for name, url in d.intro_files:
+            if not unquote(urlsplit(url).path).lower().endswith(".ipynb"):
+                continue
+            record = self.s.file_record(url, "introattachment")
+            if not record or not record["sha256"]:
+                continue
+            path = self.s.blob_path(record["sha256"])
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > MAX_NOTEBOOK_BYTES:
+                    raise ValueError("과제 노트북이 본문 추출 크기 제한을 초과했습니다")
+                markdown, notebook_html = parse_notebook_spec(path.read_bytes(), name, url)
+            except (ValueError, OSError) as exc:
+                self.s.log("notebook", str(a.cmid), False, str(exc))
+                continue
+            d.instructions += "\n\n" + markdown
+            d.instructions_html += "\n" + notebook_html
+
+        if d.instructions:
+            self.s.save_submission({
+                "cmid": a.cmid, "instructions": d.instructions,
+                "instructions_html": d.instructions_html,
+            })
+
     def _sync_lti_assignment(self, course, a) -> None:
         """LTI 인증 중간 폼을 읽기 전용으로 따라가 외부 과제 명세를 저장한다."""
+        previous = self.s.query("SELECT * FROM submission WHERE cmid=?", (a.cmid,))
+        previous = dict(previous[0]) if previous else {}
+        previous_fields = json.loads(previous.get("fields_json") or "{}")
+        warnings = []
         try:
-            assignment = fetch_lti_assignment(self.c, a.cmid)
-        except LtiArchiveError as exc:
-            # 모든 LTI 활동이 과제인 것은 아니다. 지원하지 않는 외부 도구가
-            # 강좌 전체 동기화를 막지 않게 진단 로그만 남긴다.
-            self.s.log("lti", str(a.cmid), False, str(exc))
-            return
+            assignment = fetch_lti_assignment(self.c, a.cmid, title=a.title)
         except Exception as exc:
             self.s.log("lti", str(a.cmid), False, str(exc))
-            return
+            if (previous.get("title") != a.title or not previous.get("instructions")
+                    or previous_fields.get("Provider") != "Gradescope"):
+                return
+            # A closed/submitted assignment can redirect to the dashboard even
+            # though its public linked problems are still available to read.
+            instructions = previous["instructions"].split("<!-- yonstudy:leetcode:start -->", 1)[0]
+            instructions_html = (previous.get("instructions_html") or "").split("<!-- yonstudy:leetcode:start -->", 1)[0]
+            for provider in ("Yonsei-OJ", "LeetCode"):
+                instructions = instructions.split(f"\n## {provider} 상세 명세", 1)[0]
+                instructions_html = instructions_html.split(f"<h2>{provider} 상세 명세</h2>", 1)[0]
+            assignment = LtiAssignment(
+                provider="Gradescope", title=a.title,
+                source_url=getattr(a, "url", ""),
+                instructions=instructions.strip(), instructions_html=instructions_html.strip(),
+                question_count=int(previous_fields.get("Question count") or 0),
+                total_points=previous_fields.get("Maximum marks"),
+            )
+            warnings.append("Gradescope 명세를 다시 열 수 없어 이전 수집본을 사용했습니다.")
 
         oj_contest = None
         try:
@@ -530,9 +582,39 @@ class Archiver:
                 a.title,
                 self.s.root / "yonsei-oj-cookies.txt",
             )
-        except OjArchiveError as exc:
+        except (OjArchiveError, OSError, ValueError) as exc:
             # Gradescope 명세는 보존하고 OJ 쪽 문제만 다음 동기화에서 다시 시도한다.
             self.s.log("yonsei_oj", str(a.cmid), False, str(exc))
+            warning = f"Yonsei-OJ 상세 명세 수집 실패: {exc}"
+            # A temporary external failure must not erase a previously collected
+            # problem set. The current Gradescope instructions still refresh.
+            marker = "## Yonsei-OJ 상세 명세"
+            old = previous.get("instructions") or ""
+            if previous.get("title") == a.title and marker in old:
+                retained = marker + old.split(marker, 1)[1].split("<!-- yonstudy:leetcode:start -->", 1)[0]
+                html_marker = "<h2>Yonsei-OJ 상세 명세</h2>"
+                old_html = previous.get("instructions_html") or ""
+                retained_html = (html_marker + old_html.split(html_marker, 1)[1].split("<!-- yonstudy:leetcode:start -->", 1)[0]) if html_marker in old_html else ""
+                assignment = replace(
+                    assignment,
+                    instructions=assignment.instructions + "\n\n" + retained.strip(),
+                    instructions_html=assignment.instructions_html + "\n" + retained_html,
+                )
+                warning += " (이전 수집본 유지)"
+            warnings.append(warning)
+
+        if previous.get("title") == a.title:
+            cached = {}
+            for key in ("instructions", "instructions_html"):
+                match = re.search(r"<!-- yonstudy:leetcode:start -->.*?<!-- yonstudy:leetcode:end -->", previous.get(key) or "", re.S)
+                if match:
+                    cached[key] = getattr(assignment, key) + "\n\n" + match.group()
+            if cached:
+                assignment = replace(assignment, **cached)
+        assignment, leetcode_warnings = enrich_with_leetcode(assignment)
+        warnings.extend(leetcode_warnings)
+        for warning in leetcode_warnings:
+            self.s.log("leetcode", str(a.cmid), False, warning)
 
         fields = {
             "Provider": assignment.provider,
@@ -544,6 +626,12 @@ class Archiver:
             fields["External provider"] = "Yonsei-OJ"
             fields["External contest"] = oj_contest.title
             fields["External problem count"] = str(len(oj_contest.problems))
+        elif warnings and "## Yonsei-OJ 상세 명세" in assignment.instructions:
+            for key in ("External provider", "External contest", "External problem count"):
+                if key in previous_fields:
+                    fields[key] = previous_fields[key]
+        if warnings:
+            fields["Collection warnings"] = warnings
         self.s.save_submission(
             {
                 "cmid": a.cmid,
@@ -841,8 +929,12 @@ class Archiver:
 
     def _fetch_file(self, course, a, url, name, role, cdir, subdir) -> None:
         existing = self.s.file_record(url, role)
+        notebook = role == "introattachment" and unquote(urlsplit(url).path).lower().endswith(".ipynb")
         if self._file_is_current(course, a, existing, role, name):
-            return
+            # Teacher notebooks are small source documents needed for future
+            # --no-files refreshes, including when other files go straight remote.
+            if not notebook or (existing["sha256"] and self.s.blob_path(existing["sha256"]).is_file()):
+                return
         try:
             body, _ = self._get_bytes(url, referer=a.url)
         except SessionExpired:
@@ -850,6 +942,8 @@ class Archiver:
         except Exception as exc:
             self.s.log("file", url[:120], False, str(exc))
             return
+        if notebook and len(body) <= MAX_NOTEBOOK_BYTES:
+            self.s.put_blob(body)
         self._save_bytes(course, a, body, url, name, role, cdir, subdir)
 
     def _file_is_current(self, course, a, existing, role, name) -> bool:

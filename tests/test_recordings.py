@@ -265,6 +265,12 @@ end = "10:50"
         import_timetable(self.store, path)
         recording = self.root / "20260908_101500.m4a"
         recording.write_bytes(b"consume me")
+        subtitles = {
+            ".ko.srt": "1\n00:00:00,000 --> 00:00:01,000\n강의 내용\n",
+            ".en.vtt": "WEBVTT\n\n00:00.000 --> 00:01.000\nLecture\n",
+        }
+        for suffix, body in subtitles.items():
+            recording.with_suffix(suffix).write_text(body, encoding="utf-8")
         archive = self.root / "archive"
 
         with patch(
@@ -282,6 +288,42 @@ end = "10:50"
         self.assertEqual(target.parts[-3:-1], ("2026-2", "CSI2102_데이터베이스"))
         self.assertTrue(target.name.startswith("W02-L01__강의녹음__20260908_1015__r"))
         self.assertEqual(target.read_bytes(), b"consume me")
+        for suffix, body in subtitles.items():
+            self.assertFalse(recording.with_suffix(suffix).exists())
+            self.assertEqual(target.with_suffix(suffix).read_text(encoding="utf-8"), body)
+
+    def test_copy_keeps_original_audio_and_subtitle(self):
+        recording = self.root / "20260907_091500.m4a"
+        recording.write_bytes(b"copy me")
+        subtitle = recording.with_suffix(".srt")
+        subtitle.write_bytes(b"original subtitle")
+
+        with patch("yonstudy.recordings.probe_media", return_value=(None, 60.0, None)):
+            result = classify_recordings(self.store, [recording])
+
+        target = self.store.root / self.store.query("SELECT path FROM recording")[0]["path"]
+        self.assertEqual((result.imported, result.moved), (1, 0))
+        self.assertTrue(recording.is_file())
+        self.assertEqual(subtitle.read_bytes(), b"original subtitle")
+        self.assertEqual(target.with_suffix(".srt").read_bytes(), b"original subtitle")
+
+    def test_conflicting_subtitle_keeps_both_versions_and_input_recording(self):
+        recording = self.root / "20260907_091500.m4a"
+        recording.write_bytes(b"keep me")
+        with patch("yonstudy.recordings.probe_media", return_value=(None, 60.0, None)):
+            classify_recordings(self.store, [recording])
+        target = self.store.root / self.store.query("SELECT path FROM recording")[0]["path"]
+        target.with_suffix(".ko.srt").write_bytes(b"edited archive transcript")
+        subtitle = recording.with_suffix(".ko.srt")
+        subtitle.write_bytes(b"different input transcript")
+
+        with patch("yonstudy.recordings.probe_media", return_value=(None, 60.0, None)):
+            result = classify_recordings(self.store, [recording], move=True)
+
+        self.assertEqual((result.failed, result.imported, result.moved), (1, 0, 0))
+        self.assertTrue(recording.is_file())
+        self.assertEqual(subtitle.read_bytes(), b"different input transcript")
+        self.assertEqual(target.with_suffix(".ko.srt").read_bytes(), b"edited archive transcript")
 
     def test_stored_unmatched_blob_is_reclassified_after_timetable_is_added(self):
         recording = self.root / "20260907_091500.m4a"
@@ -296,6 +338,8 @@ end = "10:50"
         old_path = Path(self.store.query("SELECT path FROM recording")[0]["path"])
         self.assertEqual(initial.unclassified, 1)
         self.assertTrue(old_path.is_file())
+        old_subtitle = old_path.with_suffix(".en.srt")
+        old_subtitle.write_bytes(b"transcription completed before reclassification")
 
         timetable = self._write_timetable([{
             "course_id": 1, "weekday": "월", "start": "09:00", "end": "10:50",
@@ -308,6 +352,11 @@ end = "10:50"
         self.assertEqual(row["match_status"], "matched")
         self.assertFalse(old_path.exists())
         self.assertTrue(Path(row["path"]).is_file())
+        self.assertFalse(old_subtitle.exists())
+        self.assertEqual(
+            Path(row["path"]).with_suffix(".en.srt").read_bytes(),
+            b"transcription completed before reclassification",
+        )
 
 
 if __name__ == "__main__":

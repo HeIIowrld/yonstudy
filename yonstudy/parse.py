@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import unquote, urljoin
 
+from .html_content import clean_html, find_elements, html_to_markdown
+
 LEARNUS = "https://ys.learnus.org"
 
 SEMESTER_NAMES = {"10": "1학기", "11": "여름계절수업", "20": "2학기", "21": "겨울계절수업"}
@@ -722,189 +724,40 @@ class AssignDetail:
 _PLUGINFILE = re.compile(r'href="(https://ys\.learnus\.org/pluginfile\.php/[^"]+)"[^>]*>(.*?)</a>', re.S)
 
 
-_VOID_TAGS = {
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
-    "meta", "param", "source", "track", "wbr",
-}
-
-
-class _InnerHtmlExtractor(HTMLParser):
-    """조건에 맞는 요소의 내부 HTML을 중첩 깊이를 지켜 추출한다."""
-
-    def __init__(self, matcher):
-        super().__init__(convert_charrefs=False)
-        self.matcher = matcher
-        self.depth = 0
-        self.current: list[str] = []
-        self.fragments: list[str] = []
-
-    def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        if self.depth:
-            self.current.append(self.get_starttag_text())
-            if tag not in _VOID_TAGS:
-                self.depth += 1
-        elif self.matcher(tag, dict(attrs)):
-            self.depth = 1
-
-    def handle_startendtag(self, _tag, _attrs):
-        if self.depth:
-            self.current.append(self.get_starttag_text())
-
-    def handle_endtag(self, tag):
-        if not self.depth:
-            return
-        self.depth -= 1
-        if self.depth:
-            self.current.append(f"</{tag}>")
-        else:
-            fragment = "".join(self.current).strip()
-            if fragment:
-                self.fragments.append(fragment)
-            self.current = []
-
-    def handle_data(self, data):
-        if self.depth:
-            self.current.append(data)
-
-    def handle_entityref(self, name):
-        if self.depth:
-            self.current.append(f"&{name};")
-
-    def handle_charref(self, name):
-        if self.depth:
-            self.current.append(f"&#{name};")
-
-
-class _MarkdownExtractor(HTMLParser):
-    """과제 본문 HTML을 의존성 없이 읽기 좋은 Markdown으로 바꾼다."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self.links: list[str | None] = []
-        self.ignored = 0
-
-    def _newline(self, count: int = 1) -> None:
-        self.parts.append("\n" * count)
-
-    def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        values = dict(attrs)
-        if tag in {"script", "style", "noscript"}:
-            self.ignored += 1
-            return
-        if self.ignored:
-            return
-        if re.fullmatch(r"h[1-6]", tag):
-            self._newline(2)
-            self.parts.append("#" * int(tag[1]) + " ")
-        elif tag == "li":
-            self._newline()
-            self.parts.append("- ")
-        elif tag in {"p", "div", "section", "article", "tr"}:
-            self._newline()
-        elif tag == "br":
-            self._newline()
-        elif tag == "hr":
-            self._newline(2)
-            self.parts.append("---")
-            self._newline(2)
-        elif tag in {"strong", "b"}:
-            self.parts.append("**")
-        elif tag in {"em", "i"}:
-            self.parts.append("*")
-        elif tag == "a":
-            self.links.append(values.get("href"))
-        elif tag == "img":
-            alt = values.get("alt") or values.get("title") or "이미지"
-            src = values.get("src") or values.get("data-src") or ""
-            self.parts.append(f"![{alt}]({src})" if src else f"[{alt}]")
-
-    def handle_endtag(self, tag):
-        tag = tag.lower()
-        if tag in {"script", "style", "noscript"}:
-            self.ignored = max(0, self.ignored - 1)
-            return
-        if self.ignored:
-            return
-        if re.fullmatch(r"h[1-6]", tag) or tag in {
-            "p", "div", "section", "article", "li", "tr",
-        }:
-            self._newline()
-        elif tag in {"strong", "b"}:
-            self.parts.append("**")
-        elif tag in {"em", "i"}:
-            self.parts.append("*")
-        elif tag == "a":
-            href = self.links.pop() if self.links else None
-            if href:
-                self.parts.append(f" ({html_mod.unescape(href)})")
-
-    def handle_data(self, data):
-        if not self.ignored:
-            self.parts.append(data)
-
-    def markdown(self) -> str:
-        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in "".join(self.parts).splitlines()]
-        out: list[str] = []
-        for line in lines:
-            if not line and (not out or not out[-1]):
-                continue
-            out.append(line)
-        return "\n".join(out).strip()
-
-
-def _extract_inner_html(source: str, matcher) -> list[str]:
-    parser = _InnerHtmlExtractor(matcher)
-    parser.feed(source)
-    parser.close()
-    return parser.fragments
-
-
-def _assignment_instructions(page: str, modname: str) -> tuple[str, str]:
-    """모듈별 과제 설명 영역만 HTML/Markdown 두 형태로 반환한다."""
-    fragments: list[str] = []
+def _assignment_instructions(page: str, modname: str, source_url: str = LEARNUS) -> tuple[str, str]:
+    """모듈별 설명 영역을 중첩 HTML 구조와 리소스 URL까지 보존한다."""
+    description_classes = {
+        "activity-description", "assignintro", "submission-instructions",
+        "feedback_description",
+    }
     if modname == "turnitintooltwo":
-        for attrs, table in re.findall(r"<table\b([^>]*)>(.*?)</table>", page, re.S | re.I):
-            class_attr = re.search(r"\bclass\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I)
-            if not class_attr or "partDetails" not in class_attr.group(2).split():
-                continue
-            fragments.extend(_extract_inner_html(
-                table,
-                lambda tag, values: tag == "div"
-                and "no-overflow" in (values.get("class") or "").split(),
-            ))
+        tables = find_elements(page, lambda tag, attrs: tag == "table"
+                               and "partDetails" in (attrs.get("class") or "").split())
+        nodes = [node for table in tables for node in table.find_all(
+            lambda tag, attrs: tag == "div" and "no-overflow" in (attrs.get("class") or "").split()
+        )]
     else:
-        description_classes = {
-            "activity-description", "assignintro", "submission-instructions",
-            "feedback_description",
-        }
-        fragments = _extract_inner_html(
-            page,
-            lambda tag, values: tag in {"div", "section"} and (
-                values.get("id") == "intro"
-                or bool(description_classes & set((values.get("class") or "").split()))
-            ),
-        )
-
-    # 동일 설명이 반응형/숨김 UI에 중복 렌더링되는 경우 한 번만 남긴다.
+        nodes = find_elements(page, lambda tag, attrs: tag in {"div", "section"} and (
+            attrs.get("id") == "intro"
+            or bool(description_classes & set((attrs.get("class") or "").split()))
+        ))
+    # Ignore a matched wrapper's matched descendants; they are already included.
+    nested = {id(child) for node in nodes for child in node.find_all(lambda tag, attrs: True)}
     unique: list[str] = []
-    seen: set[str] = set()
-    for fragment in fragments:
-        key = text(fragment)
-        if key and key not in seen:
-            seen.add(key)
-            unique.append(fragment)
-    raw = "\n<hr>\n".join(unique)
     markdown_parts: list[str] = []
-    for fragment in unique:
-        parser = _MarkdownExtractor()
-        parser.feed(fragment)
-        parser.close()
-        if rendered := parser.markdown():
+    seen: set[str] = set()
+    for node in nodes:
+        if id(node) in nested:
+            continue
+        fragment = clean_html(node.inner_html(), source_url)
+        rendered = html_to_markdown(fragment, source_url)
+        # Image-only instructions are meaningful, and distinct links/images must
+        # not be collapsed merely because their visible text happens to match.
+        if rendered and rendered not in seen:
+            seen.add(rendered)
+            unique.append(fragment)
             markdown_parts.append(rendered)
-    return "\n\n---\n\n".join(markdown_parts), raw
+    return "\n\n---\n\n".join(markdown_parts), "\n<hr>\n".join(unique)
 
 
 def parse_submission(page: str, cmid: int, modname: str = "assign") -> AssignDetail:
@@ -914,7 +767,8 @@ def parse_submission(page: str, cmid: int, modname: str = "assign") -> AssignDet
     모듈별 상태를 추가로 확인한다.
     """
     d = AssignDetail(cmid=cmid, modname=modname)
-    d.instructions, d.instructions_html = _assignment_instructions(page, modname)
+    source_url = f"{LEARNUS}/mod/{modname}/view.php?id={cmid}"
+    d.instructions, d.instructions_html = _assignment_instructions(page, modname, source_url)
 
     # 라벨/값 2열 테이블은 모듈을 가리지 않고 대부분 존재한다.
     for tbl in re.findall(r"<table[^>]*>.*?</table>", page, re.S):
@@ -923,30 +777,33 @@ def parse_submission(page: str, cmid: int, modname: str = "assign") -> AssignDet
             if len(c) == 2 and c[0] and len(c[0]) < 40:
                 d.fields.setdefault(c[0], c[1])
 
-    for m in _PLUGINFILE.finditer(page):
-        url = html_mod.unescape(m.group(1))
-        name = text(m.group(2)) or url.rsplit("/", 1)[-1].split("?")[0]
-        if "submission" in url or "onlinetext" in url:
-            d.submitted_files.append((name, url))
-        elif "introattachment" in url or "_intro" in url:
-            d.intro_files.append((name, url))
-        else:
-            d.intro_files.append((name, url))
+    known_urls: set[str] = set()
+    for link in find_elements(page, lambda tag, attrs: tag == "a" and bool(attrs.get("href"))):
+        url = urljoin(source_url, link.attrs["href"])
+        if not url.startswith(LEARNUS + "/pluginfile.php/") or url in known_urls:
+            continue
+        known_urls.add(url)
+        name = text(link.inner_html()) or unquote(url.rsplit("/", 1)[-1].split("?")[0])
+        target = d.submitted_files if "submission" in url or "onlinetext" in url else d.intro_files
+        target.append((name, url))
 
-    # 본문 삽입 이미지는 링크가 아니라 img src로만 나타날 수 있다. 과제 설명을
-    # 오프라인에서도 복구할 수 있도록 일반 첨부와 같은 과제자료로 수집한다.
-    known_urls = {url for _, url in d.submitted_files + d.intro_files}
-    for attrs in re.findall(r"<img\b([^>]*)>", d.instructions_html, re.S | re.I):
-        src = re.search(r"\b(?:src|data-src)\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I)
-        if not src:
+    for img in find_elements(d.instructions_html, lambda tag, attrs: tag == "img"):
+        url = urljoin(source_url, img.attrs.get("src") or img.attrs.get("data-src") or "")
+        if not url.startswith(LEARNUS + "/pluginfile.php/") or url in known_urls:
             continue
-        url = urljoin(LEARNUS, html_mod.unescape(src.group(2)))
-        if "/pluginfile.php/" not in url or url in known_urls:
-            continue
-        alt = re.search(r"\b(?:alt|title)\s*=\s*(['\"])(.*?)\1", attrs, re.S | re.I)
-        name = text(alt.group(2)) if alt else unquote(url.rsplit("/", 1)[-1].split("?")[0])
+        name = img.attrs.get("alt") or img.attrs.get("title") or unquote(url.rsplit("/", 1)[-1].split("?")[0])
         d.intro_files.append((name or f"과제이미지_{len(d.intro_files) + 1}", url))
         known_urls.add(url)
+
+    # Turnitin places attachments next to (outside) the description container.
+    # Keep their source links in the spec even when file downloads are disabled.
+    attachments = [(name, url) for name, url in d.intro_files
+                   if url not in html_mod.unescape(d.instructions_html)]
+    if attachments:
+        links = "".join(f'<li><a href="{html_mod.escape(url, quote=True)}">{html_mod.escape(name)}</a></li>' for name, url in attachments)
+        fragment = "<h3>첨부 자료</h3><ul>" + links + "</ul>"
+        d.instructions += "\n\n" + html_to_markdown(fragment, source_url)
+        d.instructions_html += "\n" + fragment
 
     if modname == "turnitintooltwo":
         _parse_turnitin(page, d)

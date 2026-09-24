@@ -1,5 +1,8 @@
+import contextlib
+import io
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +10,69 @@ import cli
 from yonstudy.archive import SessionExpired
 from yonstudy.autoplay import Job
 from yonstudy.store import Store
+
+
+class TranscriptionReviewCommandTests(unittest.TestCase):
+    def test_dry_run_reviews_without_model_or_learnus_and_preserves_subtitle(self):
+        with tempfile.TemporaryDirectory() as root:
+            media = Path(root) / "media"
+            media.mkdir()
+            (media / "lecture.m4a").write_bytes(b"recording")
+            subtitle = media / "lecture.en.srt"
+            subtitle.write_text("broken subtitle", encoding="utf-8")
+            state = Path(root) / "state"
+            with (
+                patch("sys.argv", ["yonstudy", "transcribe-review", str(media),
+                                    "--state-dir", str(state), "--dry-run", "--stable-seconds", "0"]),
+                patch("yonstudy.transcription_worker.probe_duration", return_value=300),
+                patch("yonstudy.transcription_worker.FasterWhisperTranscriber") as backend,
+                patch("cli.get_client") as client,
+                contextlib.redirect_stdout(io.StringIO()) as out,
+            ):
+                self.assertEqual(cli.main(), 0)
+            backend.assert_not_called()
+            client.assert_not_called()
+            self.assertIn('"suspect_files": 1', out.getvalue())
+            self.assertEqual(subtitle.read_text(), "broken subtitle")
+            self.assertTrue((state / "status.md").is_file())
+
+
+class AssignmentStatusCommandTests(unittest.TestCase):
+    def test_set_list_and_reset_requirement_without_connecting_to_learnus(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course({"course_id": 1, "name": "AI비즈니스", "year": "2026", "semester": "2학기"})
+            store.save_activity({"cmid": 10, "course_id": 1, "modname": "assign", "title": "팀과제"})
+            store.save_submission({"cmid": 10, "course_id": 1, "modname": "assign", "submitted": 0, "status": "제출 안 함"})
+            store.commit()
+            args = SimpleNamespace(store=root, cmid=10, requirement="not_required", reason="대표자 제출", year=None, semester=None, all_terms=False)
+            with patch("cli.get_client") as client, contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(cli.cmd_assignment_status(args), 0)
+                self.assertIn("본인 제출 불필요", out.getvalue())
+                self.assertIn("사이트 기록: 제출 안 함", out.getvalue())
+                args.requirement = None
+                args.reason = None
+                self.assertEqual(cli.cmd_assignment_status(args), 0)
+                args.requirement = "auto"
+                self.assertEqual(cli.cmd_assignment_status(args), 0)
+                client.assert_not_called()
+            self.assertEqual(store.query("SELECT * FROM assignment_preference"), [])
+
+    def test_changing_all_assignments_accidentally_is_rejected(self):
+        args = SimpleNamespace(cmid=None, requirement="not_required", reason=None)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.cmd_assignment_status(args), 2)
+
+    def test_submission_without_activity_is_reported_after_setting(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_submission({"cmid": 10, "course_id": 1, "modname": "assign", "title": "Imported task", "submitted": 0})
+            store.commit()
+            args = SimpleNamespace(store=root, cmid=10, requirement="not_required", reason="대표자 제출", year=None, semester=None, all_terms=False)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(cli.cmd_assignment_status(args), 0)
+            self.assertIn("Imported task", out.getvalue())
+            self.assertIn("본인 제출 불필요", out.getvalue())
 
 
 class WatchCommandTests(unittest.TestCase):

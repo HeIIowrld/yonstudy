@@ -88,6 +88,8 @@ def _run_deadline_reminder(*, store_path: str, cookie_path: str, dry_run: bool =
         errors = refresh_assignments(store, client, year=year, semester=semester)
         state["errors"] = errors
         report = build_daily_report(store, target=day, year=year, semester=semester)
+        # 본인 제출 불필요 설정은 원격 제출 상태와 별도로 유지되며,
+        # 미제출뿐 아니라 상태 미확인 항목의 알림에서도 제외한다.
         due = assignments_due_today(report)
         failed_courses = {e["course_id"] for e in errors}
         # 조회 실패 시 남아 있는 과거 값을 미제출로 단정하지 않는다.

@@ -6,12 +6,14 @@ from unittest.mock import patch
 from yonstudy.lti import LtiAssignment
 from yonstudy.export import render_assignment_markdown
 from yonstudy.oj import (
+    OjArchiveError,
     OjContest,
     OjParticipationRequired,
     OjProblem,
     YonseiOjClient,
     enrich_with_yonsei_oj,
     parse_problem,
+    render_contest_html,
 )
 
 
@@ -27,7 +29,7 @@ PROBLEM_PAGE = """
 <div class="content-description screen"><div>
 <h5>Problem</h5><p>Calculate <code>N!</code> recursively.</p>
 <h5>Input</h5><p><code>0 ≤ N ≤ 20</code></p>
-<h5>Skeleton code</h5><pre><code>def factorial(n):
+<h5>Skeleton code</h5><pre><code class="language-python">def factorial(n):
     pass
 </code></pre></div><hr></div>
 """
@@ -49,6 +51,120 @@ class ProblemParserTests(unittest.TestCase):
         self.assertIn("#### Problem", problem.statement)
         self.assertIn("`N!`", problem.statement)
         self.assertIn("```python\ndef factorial(n):", problem.statement)
+
+    def test_nested_statement_keeps_sections_after_hr_and_excludes_page_actions(self):
+        page = """
+<div data-view="problem" class='wide problem-title'><h2>Stacks &amp; Queues</h2></div>
+<div class='compact problem-info-entry'>
+  <span data-label='points' class='muted pi-name'>Points:</span>
+  <span class='pi-value highlighted'><strong>20</strong></span>
+</div>
+<div id='allowed-langs'><div class='expanded toggled'><span>C++17</span>, Python</div></div>
+<div class='screen content-description wide'>
+  <div class='content-text description'>
+    <div><h2>Problem</h2><p>Read all sections.</p><hr>
+      <h3>Constraints</h3><p>The stack must be empty at the end.</p>
+    </div>
+    <h2>Output</h2><p>Print each removed value.</p>
+  </div>
+  <hr><div class='problem-actions'><a href='/submit'>Submit solution</a></div>
+</div>
+<div id='comments'>Unrelated comment</div>
+"""
+        problem = parse_problem(page, "https://yonsei-oj.duckdns.org:508/problem/stack")
+
+        self.assertEqual(problem.title, "Stacks & Queues")
+        self.assertEqual(problem.points, "20")
+        self.assertEqual(problem.languages, ["C++17", "Python"])
+        self.assertIn("#### Problem", problem.statement)
+        self.assertIn("##### Constraints", problem.statement)
+        self.assertIn("#### Output", problem.statement)
+        self.assertIn("Print each removed value.", problem.statement)
+        self.assertNotIn("Submit solution", problem.statement)
+        self.assertNotIn("Unrelated comment", problem.statement)
+
+    def test_yonsei_anonymous_statement_preserves_highlighted_code_and_omits_clarification_action(self):
+        page = """
+<div class='problem-title'><h2>Array Maximum</h2></div>
+<div class='content-description screen'>
+  <div><h5>Problem</h5><p>Find the largest value.</p><hr>
+    <h5>Skeleton code</h5>
+    <div class='codehilite'><pre><span></span><code><span class='n'>arr</span> <span class='o'>=</span> <span class='nb'>list</span><span class='p'>(</span><span class='nb'>map</span><span class='p'>(</span><span class='nb'>int</span><span class='p'>, </span><span class='nb'>input</span><span class='p'>().split()))</span>
+
+<span class='c1'># Type your code in here.</span>
+</code></pre></div>
+  </div>
+  <hr><a href='/problem/array/tickets/new' class='button clarify'>Request clarification</a>
+</div>
+<div class='clarifications-area'>No clarifications have been made.</div>
+"""
+        problem = parse_problem(page, "https://yonsei-oj.duckdns.org:508/problem/array")
+
+        self.assertIn("#### Skeleton code", problem.statement)
+        self.assertIn("arr = list(map(int, input().split()))\n\n# Type your code in here.", problem.statement)
+        self.assertIn("---", problem.statement)
+        self.assertNotIn("Request clarification", problem.statement)
+        self.assertNotIn("No clarifications", problem.statement)
+        self.assertNotIn("/tickets/new", problem.statement_html)
+
+    def test_statement_without_separator_keeps_tables_figures_links_math_and_lists(self):
+        page = """
+<div class='problem-title'><h2>Tree traversal</h2></div>
+<div class='content-description screen'>
+  <h5>Traversal order</h5>
+  <ol start='2'><li>Visit the root.</li><li>Visit its children.</li></ol>
+  <table><thead><tr><th>Input</th><th>Output</th></tr></thead>
+    <tbody><tr><td>3</td><td>1 2 3</td></tr></tbody></table>
+  <p><img src='/media/tree.png' alt='Example tree'></p>
+  <p>Download <a href='../media/tree.txt'>example data</a>.</p>
+  <p>Bound: <script type='math/tex'>n^2</script>.</p>
+  <script>alert('page script')</script>
+</div>
+"""
+        problem = parse_problem(page, "https://yonsei-oj.duckdns.org:508/problem/tree")
+
+        self.assertIn("2. Visit the root.", problem.statement)
+        self.assertIn("3. Visit its children.", problem.statement)
+        self.assertIn("| Input | Output |", problem.statement)
+        self.assertIn("| 3 | 1 2 3 |", problem.statement)
+        self.assertIn("![Example tree](https://yonsei-oj.duckdns.org:508/media/tree.png)", problem.statement)
+        self.assertIn("[example data](https://yonsei-oj.duckdns.org:508/media/tree.txt)", problem.statement)
+        self.assertIn("$n^2$", problem.statement)
+        self.assertIn("<table>", problem.statement_html)
+        self.assertNotIn("page script", problem.statement)
+        self.assertNotIn("<script", problem.statement_html)
+
+    def test_code_whitespace_and_explicit_language_survive_but_samples_are_unlabelled(self):
+        page = """
+<div class='problem-title'><h2>Formatting</h2></div>
+<div id='allowed-langs'><div class='toggled'>Python</div></div>
+<div class='content-description screen'><div class='content-text'>
+<h5>Skeleton</h5><pre><code class='language-cpp'>int main() {
+    // Keep indentation and an empty line.
+
+
+    return 0;
+}
+</code></pre>
+<h5>Sample input</h5><pre>  2  4
+    8
+</pre>
+</div></div>
+"""
+        problem = parse_problem(page, "https://yonsei-oj.duckdns.org:508/problem/format")
+
+        self.assertIn("```cpp\nint main() {", problem.statement)
+        self.assertIn("    // Keep indentation and an empty line.\n\n\n    return 0;", problem.statement)
+        self.assertIn("```\n  2  4\n    8\n```", problem.statement)
+        self.assertNotIn("```python", problem.statement)
+
+    def test_absent_or_empty_statement_is_reported_instead_of_archiving_the_whole_page(self):
+        for body in ("", "<div class='content-description screen'><script>ignored</script></div>"):
+            with self.subTest(body=body), self.assertRaises(OjArchiveError):
+                parse_problem(
+                    "<div class='problem-title'><h2>Empty</h2></div>" + body,
+                    "https://yonsei-oj.duckdns.org:508/problem/empty",
+                )
 
 
 class ContestClientTests(unittest.TestCase):
@@ -104,6 +220,26 @@ class ContestClientTests(unittest.TestCase):
 
 
 class AssignmentEnrichmentTests(unittest.TestCase):
+    def test_html_export_preserves_problem_structure(self):
+        problem = parse_problem(
+            PROBLEM_PAGE,
+            "https://yonsei-oj.duckdns.org:508/problem/ds1of1",
+        )
+        contest = OjContest(
+            slug="dscontest1",
+            title="Recursion & More",
+            url="https://yonsei-oj.duckdns.org:508/contest/dscontest1",
+            problems=[problem],
+        )
+
+        rendered = render_contest_html(contest)
+
+        self.assertIn("Recursion &amp; More", rendered)
+        self.assertIn("<h4>Problem</h4>", rendered)
+        self.assertIn('<pre><code class="language-python">def factorial(n):', rendered)
+        self.assertNotIn("&lt;h4&gt;", rendered)
+        self.assertNotIn("```", rendered)
+
     def test_oj_problem_specs_are_appended_for_draft_generation(self):
         assignment = LtiAssignment(
             provider="Gradescope",
@@ -141,6 +277,8 @@ class AssignmentEnrichmentTests(unittest.TestCase):
         self.assertIn("`ds1of1`", enriched.instructions)
         self.assertIn("허용 언어: Python", enriched.instructions)
         self.assertIn("Yonsei-OJ 상세 명세", enriched.instructions_html)
+        self.assertIn("<h4>Problem</h4>", enriched.instructions_html)
+        self.assertNotIn("<pre>#### Problem", enriched.instructions_html)
 
         rendered = render_assignment_markdown(
             {"title": "자료구조"},

@@ -1,0 +1,73 @@
+name: yonstudy-transcription
+
+x-transcriber: &transcriber
+  image: yonstudy-transcriber:local
+  build:
+    context: ${YONSTUDY_TRANSCRIBE_BUILD_CONTEXT:-.}
+    dockerfile: Dockerfile.transcribe
+  container_name: yonstudy-transcriber
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 120s
+  environment: &base-environment
+    TZ: Asia/Seoul
+    YONSTUDY_TRANSCRIBE_DEVICE: ${YONSTUDY_TRANSCRIBE_DEVICE:-cpu}
+    YONSTUDY_TRANSCRIBE_COMPUTE_TYPE: ${YONSTUDY_TRANSCRIBE_COMPUTE_TYPE:-int8}
+    YONSTUDY_TRANSCRIBE_LANGUAGE: ${YONSTUDY_TRANSCRIBE_LANGUAGE:-auto}
+    YONSTUDY_TRANSCRIBE_STABLE_SECONDS: ${YONSTUDY_TRANSCRIBE_STABLE_SECONDS:-120}
+    YONSTUDY_TRANSCRIBE_BEAM_SIZE: ${YONSTUDY_TRANSCRIBE_BEAM_SIZE:-1}
+    YONSTUDY_TRANSCRIBE_INTERVAL: ${YONSTUDY_TRANSCRIBE_INTERVAL:-300}
+    YONSTUDY_TRANSCRIBE_LIMIT: ${YONSTUDY_TRANSCRIBE_LIMIT:-1}
+    YONSTUDY_TRANSCRIBE_MODEL_CACHE: /models
+    YONSTUDY_TRANSCRIBE_STATE_DIR: /state
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  # Use when the machine can mount the archive directly (NAS/local disk/SMB mount).
+  transcriber-local:
+    <<: *transcriber
+    profiles: ["local"]
+    cpuset: ${YONSTUDY_TRANSCRIBE_CPUSET:-0-1}
+    mem_limit: ${YONSTUDY_TRANSCRIBE_MEMORY:-2g}
+    environment:
+      <<: *base-environment
+      YONSTUDY_TRANSCRIBE_MODEL: ${YONSTUDY_TRANSCRIBE_MODEL:-small}
+      YONSTUDY_TRANSCRIBE_MODEL_ID: ${YONSTUDY_TRANSCRIBE_MODEL_ID:-small-int8}
+      YONSTUDY_TRANSCRIBE_CPU_THREADS: ${YONSTUDY_TRANSCRIBE_CPU_THREADS:-2}
+      OMP_NUM_THREADS: ${YONSTUDY_TRANSCRIBE_CPU_THREADS:-2}
+      YONSTUDY_TRANSCRIBE_ROOT: /archive
+      YONSTUDY_TRANSCRIBE_REPORT: /archive/전사_현황.md
+      YONSTUDY_TRANSCRIBE_REPROCESS_LIST: /state/reprocess.txt
+    volumes:
+      - ${YONSTUDY_TRANSCRIBE_ARCHIVE_DIR:-./archive}:/archive
+      - ${YONSTUDY_TRANSCRIBE_MODEL_DIR:-./.transcription/models}:/models
+      - ${YONSTUDY_TRANSCRIBE_LOCAL_STATE_DIR:-./.transcription/local/state}:/state
+
+  # Use on a compute machine. Media is staged with rclone; only reviewed results
+  # and worker state are copied back to the remote archive.
+  transcriber-remote:
+    <<: *transcriber
+    profiles: ["remote"]
+    cpuset: ${YONSTUDY_TRANSCRIBE_CPUSET:-0-11}
+    mem_limit: ${YONSTUDY_TRANSCRIBE_MEMORY:-7g}
+    entrypoint: ["/usr/local/bin/python", "/app/deploy/remote_transcribe_loop.py"]
+    environment:
+      <<: *base-environment
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      YONSTUDY_TRANSCRIBE_MODEL: ${YONSTUDY_TRANSCRIBE_MODEL:-large-v3-turbo}
+      YONSTUDY_TRANSCRIBE_MODEL_ID: ${YONSTUDY_TRANSCRIBE_MODEL_ID:-large-v3-turbo-int8}
+      YONSTUDY_TRANSCRIBE_CPU_THREADS: ${YONSTUDY_TRANSCRIBE_CPU_THREADS:-12}
+      OMP_NUM_THREADS: ${YONSTUDY_TRANSCRIBE_CPU_THREADS:-12}
+      YONSTUDY_TRANSCRIBE_REMOTE: ${YONSTUDY_TRANSCRIBE_REMOTE:-nas:semester}
+      YONSTUDY_TRANSCRIBE_REMOTE_STATE: ${YONSTUDY_TRANSCRIBE_REMOTE_STATE:-nas:.yonstudy/transcription}
+      YONSTUDY_TRANSCRIBE_LOCAL_ROOT: /work/archive
+      YONSTUDY_TRANSCRIBE_REPROCESS_LIST: /state/reprocess.txt
+    volumes:
+      - ${YONSTUDY_TRANSCRIBE_WORK_DIR:-./.transcription/remote/archive}:/work/archive
+      - ${YONSTUDY_TRANSCRIBE_MODEL_DIR:-./.transcription/models}:/models
+      - ${YONSTUDY_TRANSCRIBE_REMOTE_STATE_DIR:-./.transcription/remote/state}:/state
+      - ${YONSTUDY_RCLONE_CONFIG:-${HOME}/.config/rclone/rclone.conf}:/config/rclone/rclone.conf:ro

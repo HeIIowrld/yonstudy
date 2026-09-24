@@ -785,12 +785,64 @@ def _link_blob(store, digest: str, target: Path) -> None:
         shutil.copy2(blob, target)
 
 
+def _stored_recording_path(store, value: str | None) -> Path | None:
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else store.root / path
+
+
+def _copy_recording_subtitles(source: Path, target: Path) -> list[tuple[Path, Path, bytes]]:
+    """원본의 언어 태그를 유지해 자막을 복사하고, 성공한 사본만 돌려준다."""
+    copied = []
+    prefix = source.stem.casefold() + "."
+    if not source.parent.is_dir():
+        return copied
+    for subtitle in sorted(source.parent.iterdir()):
+        if (
+            not subtitle.name.casefold().startswith(prefix)
+            or subtitle.suffix.casefold() not in {".srt", ".vtt"}
+            or not subtitle.is_file()
+        ):
+            continue
+        suffix = subtitle.name[len(source.stem):]
+        output = target.with_name(target.stem + suffix)
+        if subtitle.resolve() == output.resolve():
+            continue
+        body = subtitle.read_bytes()
+        try:
+            handle = output.open("xb")
+        except FileExistsError:
+            if output.read_bytes() != body:
+                raise FileExistsError(f"기존 자막의 내용이 달라 보관을 중단합니다: {output}")
+        else:
+            try:
+                with handle:
+                    handle.write(body)
+            except OSError:
+                output.unlink(missing_ok=True)
+                raise
+        copied.append((subtitle, output, body))
+    return copied
+
+
+def _remove_copied_subtitles(copied: list[tuple[Path, Path, bytes]]) -> None:
+    for source, target, body in copied:
+        try:
+            # 복사 이후 전사기나 사용자가 수정한 자막은 그대로 남긴다.
+            if source.read_bytes() == body and target.read_bytes() == body:
+                source.unlink()
+        except OSError:
+            continue
+
+
 def _remove_old_managed_link(
     store,
     old_path: str | None,
     target: Path,
     digest: str,
     destination: Path | None,
+    copied_subtitles: list[tuple[Path, Path, bytes]],
 ) -> None:
     if not old_path:
         return
@@ -822,6 +874,7 @@ def _remove_old_managed_link(
         if not same_content:
             return
         old.unlink()
+        _remove_copied_subtitles(copied_subtitles)
     except (OSError, ValueError):
         return
 
@@ -872,6 +925,8 @@ def reclassify_unmatched(
             destination_path,
         )
         _link_blob(store, row["sha256"], target)
+        old = _stored_recording_path(store, row.get("path"))
+        subtitles = _copy_recording_subtitles(old, target) if old else []
         try:
             stored_path = str(target.relative_to(store.root))
         except ValueError:
@@ -905,6 +960,7 @@ def reclassify_unmatched(
             target,
             row["sha256"],
             destination_path,
+            subtitles,
         )
         changed += 1
     return changed
@@ -1059,6 +1115,13 @@ def classify_recordings(
                 )
                 _link_blob(store, digest, target)
                 old_path = previous[0]["path"] if previous else None
+                subtitles = _copy_recording_subtitles(path, target)
+                old = _stored_recording_path(store, old_path)
+                old_is_source = old is not None and old.resolve() == path.resolve()
+                old_subtitles = (
+                    _copy_recording_subtitles(old, target)
+                    if old is not None and not old_is_source else []
+                )
                 try:
                     stored_path = str(target.relative_to(store.root))
                 except ValueError:
@@ -1084,13 +1147,15 @@ def classify_recordings(
                     "details_json": json.dumps(match.details, ensure_ascii=False),
                 })
                 store.commit()
-                _remove_old_managed_link(
-                    store,
-                    old_path,
-                    target,
-                    digest,
-                    destination_path,
-                )
+                if not old_is_source:
+                    _remove_old_managed_link(
+                        store,
+                        old_path,
+                        target,
+                        digest,
+                        destination_path,
+                        old_subtitles,
+                    )
                 item["path"] = stored_path
                 item["sha256"] = digest
                 result.imported += 1
@@ -1098,6 +1163,7 @@ def classify_recordings(
                     state["files"][str(path)]["processed"] = True
                 if move and path.resolve() != target.resolve():
                     path.unlink()
+                    _remove_copied_subtitles(subtitles)
                     result.moved += 1
             result.items.append(item)
         except Exception as exc:

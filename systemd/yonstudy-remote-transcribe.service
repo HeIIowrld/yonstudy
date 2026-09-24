@@ -1,0 +1,28 @@
+[Unit]
+Description=Review and transcribe NAS lectures on the compute LXC
+Documentation=file:/root/yonstudy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/yonstudy
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/yonstudy/transcription.env
+ExecStart=/root/yonstudy/.venv/bin/python /root/yonstudy/deploy/remote_transcribe_loop.py
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=15min
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+MemoryHigh=6G
+MemoryMax=7G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/yonstudy-transcription
+
+[Install]
+WantedBy=multi-user.target
