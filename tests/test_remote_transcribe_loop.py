@@ -20,15 +20,18 @@ class RemoteTranscriptionTests(unittest.TestCase):
             mirror = Path(root) / "mirror"
             pull_archive("nas:semester", mirror)
         args = run.call_args.args
-        self.assertEqual(args[:3], ("rclone", "copy", "nas:semester"))
+        self.assertEqual(args[:3], ("rclone", "sync", "nas:semester"))
         self.assertEqual(args[3], str(mirror))
         self.assertIn("+ *.m4a", args)
         self.assertIn("+ *.srt", args)
         self.assertIn("- *", args)
+        self.assertIn("--delete-after", args)
         self.assertEqual(args[-2:], ("--transfers", "2"))
 
+    @patch("deploy.remote_transcribe_loop.subprocess.run")
     @patch("deploy.remote_transcribe_loop._run")
-    def test_only_current_model_outputs_are_published(self, run):
+    def test_only_current_model_outputs_are_published(self, run, listing):
+        listing.return_value.stdout = "fresh.m4a\n"
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)
             archive, state = base / "archive", base / "state"
@@ -38,14 +41,29 @@ class RemoteTranscriptionTests(unittest.TestCase):
             (state / "status.md").write_text("status")
             (state / "state.json").write_text(
                 '{"items":{"fresh":{"status":"completed","completed_model":"large",'
-                '"subtitle":"fresh.en.srt"},"old":{"status":"completed",'
-                '"completed_model":"small","subtitle":"old.en.srt"}}}'
+                '"media":"fresh.m4a","subtitle":"fresh.en.srt"},"old":{"status":"completed",'
+                '"completed_model":"small","media":"old.m4a","subtitle":"old.en.srt"}}}'
             )
             push_results("nas:term", "nas:state", archive, state, "large")
             calls = [call.args for call in run.call_args_list]
             self.assertTrue(any("nas:term/fresh.en.srt" in call for call in calls))
             self.assertFalse(any("nas:term/old.en.srt" in call for call in calls))
             self.assertTrue(any("nas:term/전사_현황.md" in call for call in calls))
+
+    @patch("deploy.remote_transcribe_loop.subprocess.run")
+    @patch("deploy.remote_transcribe_loop._run")
+    def test_moved_media_does_not_republish_subtitle_at_old_path(self, run, listing):
+        listing.return_value.stdout = "강의미디어/lecture.m4a\n"
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root); archive = base / "archive"; state = base / "state"
+            archive.mkdir(); state.mkdir()
+            (archive / "lecture.ko.srt").write_text("old", encoding="utf-8")
+            (state / "state.json").write_text(
+                '{"items":{"old":{"status":"completed","completed_model":"large",'
+                '"media":"lecture.m4a","subtitle":"lecture.ko.srt"}}}', encoding="utf-8",
+            )
+            push_results("nas:term", "nas:state", archive, state, "large")
+        self.assertFalse(any("nas:term/lecture.ko.srt" in call.args for call in run.call_args_list))
 
 
 if __name__ == "__main__":

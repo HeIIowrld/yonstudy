@@ -60,6 +60,7 @@ class CourseVideoArchiveTests(unittest.TestCase):
 
             result = archive_course_vods(
                 store, sink, year="2026", semester="2학기",
+                migrate_existing=True,
                 download_fn=lambda *_args, **_kwargs: self.fail("downloaded again"),
             )
 
@@ -71,6 +72,42 @@ class CourseVideoArchiveTests(unittest.TestCase):
                 store.file_record("https://example.test/vod/10", "video")["remote_path"],
                 desired,
             )
+
+    def test_existing_media_stays_put_during_normal_sync(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course({
+                "course_id": 1, "year": "2026", "semester": "2학기",
+                "name": "테스트", "title": "테스트", "slug": "TST1000_테스트",
+            })
+            store.save_activity({
+                "cmid": 10, "course_id": 1, "modname": "vod",
+                "title": "Week 1-1", "url": "https://example.test/vod/10",
+                "section_idx": 1, "section_name": "1주차", "restricted": 0,
+            })
+            store.save_vod({
+                "cmid": 10, "course_id": 1, "hls_url": "https://cdn/10.m3u8",
+                "is_progress": 1, "status": "ok",
+            })
+            old = "2026-2/TST1000_테스트/old-name.mp4"
+            store.save_file({
+                "course_id": 1, "cmid": 10, "role": "video",
+                "name": "old-name.mp4", "url": "https://example.test/vod/10",
+                "sha256": "abc", "bytes": 5, "remote_path": old,
+                "remote_status": "ok",
+            })
+            store.commit()
+            sink = FakeSink()
+            sink.files[old] = b"video"
+
+            result = archive_course_vods(
+                store, sink, year="2026", semester="2학기",
+                download_fn=lambda *_args, **_kwargs: self.fail("downloaded again"),
+            )
+
+            self.assertEqual(result.skipped_files, 1)
+            self.assertEqual(result.moved_files, 0)
+            self.assertEqual(set(sink.files), {old})
 
     def test_withdrawn_course_video_is_not_an_archive_candidate(self):
         with tempfile.TemporaryDirectory() as root:

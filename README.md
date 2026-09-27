@@ -13,6 +13,8 @@ SFTP, WebDAV, OneDrive 같은 rclone 원격 저장소에 증분 업로드할 수
 | 자료 수집 | `archive` | SQLite, 첨부 파일, 게시글, 자막 저장 |
 | 수집 현황 확인 | `status` | 강좌·활동·파일·진도 개수 출력 |
 | 오늘 할 일 확인 | `report` | 공개 자료, 과제, 게시글, 미수강 영상 정리 |
+| 과제 한눈에 보기 생성 | `summarize-assignments` | Gemini로 과제 본문 요약을 생성·갱신 |
+| 강좌 내용 요약 생성 | `summarize-courses` | 전사본으로 강좌 전체·강의별 핵심 내용을 생성·갱신 |
 | 로컬 폴더 만들기 | `export` | 학기/과목별 일반 파일 트리 생성 |
 | NAS·클라우드 업로드 | `upload` | rclone 원격 저장소에 증분 업로드 |
 | 일일 작업 한 번에 실행 | `automate` | 현재 학기 수집, 업로드, 리포트 생성 |
@@ -129,6 +131,111 @@ python cli.py status      # 지금까지 수집한 데이터 요약
 저장된 OJ 설명도 내보낼 때 제목·입출력·예제·시작 코드로 구분한다. 지수 표기는
 Markdown에서도 `10^4`처럼 보존한다. LeetCode의 공개 예시 그림은 HTML에 함께
 저장하므로 인터넷 없이도 볼 수 있다. PDF가 필요하면 브라우저에서 인쇄하여 저장한다.
+
+### 과제 한눈에 보기 (선택)
+
+`summarize-assignments`는 수집된 과제 제목과 본문을 Gemini에 보내 한 줄 요약,
+제출물, 필수 조건을 만든다. 과목별 규칙은 필요하지 않다. 원문과 요약은 별도로
+보관하며, 본문이 달라진 요약은 다시 생성되기 전까지 목록·메일에서 숨긴다.
+마감·제출 상태는 LearnUs에서 수집한 값을 그대로 표시한다. 본문이 없으면
+요약하지 않는다. 과목별 `과제자료/과제요약_자동생성.md`에도 별도 저장한다.
+
+API 키는 Git에 저장하지 않는다. 로컬에서는 `store/gemini-api-key` 파일에 키만
+한 줄로 넣고 권한을 `0600`으로 설정하면 된다. `store/`는 Git에서 제외된다.
+환경 변수 `GEMINI_API_KEY`가 있으면 파일보다 우선한다. 셸에서 일시적으로
+사용할 때는 숨김 입력으로 설정할 수 있다.
+
+```bash
+read -rsp 'Gemini API key: ' GEMINI_API_KEY; echo
+export GEMINI_API_KEY
+python cli.py summarize-assignments --dry-run
+python cli.py summarize-assignments --limit 10
+python cli.py export --year 2026 --semester 2학기
+```
+
+기본 대상은 현재 학기다. `--all-terms`로 모든 학기를, 과제 ID를 지정해 한 과제만
+처리할 수 있다. `--limit 0`은 남은 대상 전체를 처리한다. 실제 무료 티어의 분당·일일
+한도는 [Google AI Studio](https://aistudio.google.com/)에서 확인한다. API 오류가 나면
+다음 실행에서 해당 과제를 다시 시도하며 수집과 리포트는 계속 진행한다.
+
+### 전사본 기반 강좌 내용 요약 (선택)
+
+`summarize-courses`는 현재 학기 강좌 폴더의 `.srt`·`.vtt` 전사본을 읽어
+강좌 전체 개요, 핵심 개념, 강의별 내용과 중요한 점을 생성한다. 같은 내용의 복제
+자막은 Gemini에서 한 번만 처리하되 원본 영상·녹음별 탐색 파일은 각각 만든다.
+전사본이 바뀐 강좌만 다시 요약한다. 전사본이
+없는 강좌는 AI 내용 요약을 만들지 않는다. 기존 강의별 요약을 Gemini가 주차별로
+다시 묶고, 파일명에 주차가 없으면 `주차미확인`에 둔다. 학습목차는 기존 강의자료,
+영상·녹음, 전사본도 함께 찾아 주차별로 연결한다. 새로 받는 원본은 주차 폴더 없이
+자료 종류별 보관함에 저장하고, 기존 파일은 `organize-archive`로 점검 후 이동한다.
+결과 파일은 다음 구조다.
+
+```text
+<강좌>/
+├── 00_학습목차_자동생성.html  # 탐색기에서 열면 주차별 내용·자료를 한눈에 확인
+├── W01-00__주차학습_자동생성.html  # 주차 요약·영상·녹음·전사본·자료 링크
+├── 강좌정보.md
+├── 강의자료/               # PDF·PPT·CSV·코드 등 배포 자료를 평면 정렬
+├── 강의미디어/             # 영상·녹음과 같은 이름의 자막을 함께 보관
+├── 강의요약/
+│   ├── 00_학습목차_자동생성.md
+│   ├── W01-00__주차학습_자동생성.md
+│   ├── 강좌내용요약_자동생성.md
+│   └── 01주차__10_<강의명>__<ID>_요약.html/.md
+├── 과제자료/
+└── QNA_공지/
+```
+
+`강좌정보.md`와 강좌 전체 요약에서도 탐색 목록으로 연결한다. 수동 작성 문서와
+과제·공지 폴더는 자동으로 추측해 이동하지 않으며, 목차에는 원래 위치를 표시한다.
+아직 전사되지 않은
+강의나 잘못 전사된 내용은 반영되지 않을 수 있으므로 학습·시험 전에 원문을 확인한다.
+
+```bash
+# NAS 마운트가 /archive/2026-2에 있는 경우
+python cli.py summarize-courses --transcripts-dir /archive/2026-2 --year 2026 --semester 2학기
+
+# rclone 원격 아카이브에서 전사본만 가져와 생성·게시
+python cli.py summarize-courses --remote 'nas:home/02_Personal/01_학교/10.학기'
+
+# 과제·강좌 생성 문서만 원격에 다시 게시 (미디어·원본 자료는 건드리지 않음)
+python cli.py upload-generated --remote 'nas:home/02_Personal/01_학교/10.학기'
+
+# 이전 학기까지 저장된 강의자료·영상·녹음의 탐색 목차 생성 (원본 이동 없음)
+python cli.py study-map --remote 'nas:home/02_Personal/01_학교/10.학기' --all-terms --dry-run
+python cli.py study-map --remote 'nas:home/02_Personal/01_학교/10.학기' --all-terms
+
+# 기존 파일 이동 미리보기. 기본값은 읽기 전용이다.
+python cli.py organize-archive --remote 'nas:home/02_Personal/01_학교/10.학기' --all-terms
+
+# 실제 이동은 운영 DB(/data/store)를 쓰는 NAS 컨테이너 안에서 실행한다.
+# 원격 전사 작업자를 중지·업데이트한 뒤에만 --include-media를 추가한다.
+sudo docker exec -e RCLONE_CONFIG=/config/rclone.conf yonstudy flock /run/yonstudy/automation.lock python /app/cli.py --store /data/store organize-archive --remote archive: --all-terms --apply
+sudo docker exec -e RCLONE_CONFIG=/config/rclone.conf yonstudy flock /run/yonstudy/automation.lock python /app/cli.py --store /data/store organize-archive --remote archive: --all-terms --include-media --apply --worker-stopped
+```
+
+Synology 스케줄러는 Gemini 키가 설정돼 있으면 10분마다 현재 학기 전사본을
+확인하고, 변경된 강좌·주차 요약 단계를 실행당 최대 2건씩 갱신한다. 전사기가 검토를 통과한
+자막을 게시한 뒤 다음 확인 주기에 요약된다. 사용량 제한(HTTP 429)이 걸리면
+다음 실행에서 이어서 시도한다. 강좌 전사본 전체가 Gemini API로 전송되므로
+제삼자 전송을 원치 않는 전사본에는 이 기능을 켜지 않는다.
+
+Synology 컨테이너는 호스트의 `config/yonstudy.env`(컨테이너에서는
+`/config/yonstudy.env`)에 `GEMINI_API_KEY=...`을 추가하고 권한을 `0600`으로 둔다.
+또는 NAS의 `store/gemini-api-key`에 키만 넣고 권한을 `0600`으로 두어도 된다.
+기존 예약 `daily` 작업이 동기화 뒤 한 번에 최대 10개를 처리하고, 09:00 리포트도
+새 과제를 최대 5개 처리한다. 수동 백필은 아래처럼 실행한다.
+
+```bash
+sudo docker exec yonstudy /app/deploy/run-job.sh summaries
+sudo docker exec yonstudy /app/deploy/run-job.sh summaries --dry-run
+sudo docker exec yonstudy /app/deploy/run-job.sh summaries --limit 0
+```
+
+모델 기본값은 `gemini-3.5-flash-lite`이며 `YONSTUDY_SUMMARY_MODEL`로 바꿀 수 있다.
+자동 수집의 처리 개수는 `YONSTUDY_SUMMARY_LIMIT`로 조절한다. Google의
+[무료 API 약관](https://ai.google.dev/gemini-api/terms)에 따르면 입력·출력이 제품
+개선에 사용되거나 검토될 수 있으므로, 수업 자료를 전송하기 전에 확인한다.
 
 영상 MP4 본체는 단독 `archive`가 받지 않는다. 현재 학기 전체 원본 보관은
 `automate`가 6시간마다 수행하며, 수동 실행은 `archive-videos`를 사용한다.
@@ -525,8 +632,8 @@ py cli.py transcribe "\\hyunjin\homes\hjpark\02_Personal\01_학교\10.학기\202
 
 OneDrive와 Google Drive는 로컬 동기화 폴더 또는 `rclone mount` 경로를 지정한다. 온라인
 전용 파일은 읽는 순간 내려받기가 시작될 수 있으므로 장시간 운용할 서버에서는 오프라인
-보관 폴더나 NAS 마운트를 권장한다. Whisper는 자막까지만 만들며, 강의 요약은 별도 LLM 또는
-추출 요약 단계를 나중에 연결해야 한다.
+보관 폴더나 NAS 마운트를 권장한다. Whisper는 자막을 만들고,
+`summarize-courses`는 검토를 통과해 게시된 전사본을 Gemini로 요약한다.
 
 전사 배포는 루트의 `compose.transcription.yaml` 하나에서 실행 위치를 고른다.
 `local` 프로필은 NAS나 로컬 디스크의 학기 폴더를 컨테이너에 직접 마운트한다.
@@ -647,7 +754,7 @@ python cli.py scan-recordings ./inbox/recordings --destination ./exports/archive
 13:55)에 녹음을 시작했다면 다음 수업을 우선한다.
 
 분류된 파일은 SHA-256 `blob`으로 중복 제거한다. `--destination`을 주면 기존 평면 아카이브의
-과목 루트에 `W03-L01__강의녹음__20260915_1000__r8ab12c34.m4a` 형태로 연결하고,
+과목의 `강의미디어/`에 `W03-L01__강의녹음__20260915_1000__r8ab12c34.m4a` 형태로 연결하고,
 생략하면 `store/courses/<학기>/<과목>/recordings/`에 둔다. 같은 녹음을 다시 실행해도
 DB에는 한 건만 남는다. 메타데이터 제목, 녹음 시각 출처, 주차·차시, 매칭 방법과 신뢰도도
 `recording` 테이블에 함께 기록한다.
@@ -739,6 +846,9 @@ systemctl list-timers 'yonstudy-*'
 | `YONSTUDY_EXPORT_DIR` | `export` 기본 출력 경로 |
 | `YONSTUDY_MAX_FILE_MB` | 일반 첨부 파일 한 개의 최대 수집 크기. 기본 512 MB |
 | `YONSTUDY_VIDEO_ARCHIVE_LIMIT` | 자동화 한 번에 보관할 VOD 수. `0`(기본)은 현재 학기 전체 |
+| `GEMINI_API_KEY` | 과제·강좌 요약을 켜는 Gemini API 키. 없으면 `store/gemini-api-key`의 0600 파일을 확인 |
+| `YONSTUDY_SUMMARY_MODEL` | 요약 모델. 기본 `gemini-3.5-flash-lite` |
+| `YONSTUDY_SUMMARY_LIMIT` | 자동 수집 한 번당 요약 생성 개수. 기본 `10`, `0`이면 전체 |
 | `YONSTUDY_BROWSER_CHANNEL` | Playwright 브라우저 채널. 예: `chrome` |
 | `YONSTUDY_WATCH_JITTER_SECONDS` | Docker 예약 재생의 최대 시작 지연. 기본 2700초(45분) |
 | `YONSTUDY_REPORT_TO` | 자동 리포트 수신 주소 |

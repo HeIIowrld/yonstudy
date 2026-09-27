@@ -17,7 +17,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .export import term_folder
-from .flat_layout import canonical_filename
+from .flat_layout import MEDIA_DIR, canonical_filename
 
 try:
     import tomllib
@@ -743,7 +743,7 @@ def _target_for(
             if destination:
                 base = destination / term_folder(
                     course["year"], course["semester"]
-                ) / course_name
+                ) / course_name / MEDIA_DIR
             else:
                 base = (
                     store.root

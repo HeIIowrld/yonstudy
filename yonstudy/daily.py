@@ -16,6 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .assignment_state import is_submission_required, submission_requirement_label
+from .assignment_summary import current_summary
 from .progress import progress_verified
 
 
@@ -466,14 +467,16 @@ def build_daily_report(
         f"""
         SELECT s.cmid,c.course_id,c.name AS course_name,
                COALESCE(a.modname,s.modname) AS modname,
-               COALESCE(a.title,s.title) AS title,
+               COALESCE(a.title,s.title) AS title,s.title AS summary_title,
                a.url,a.section_idx,a.section_name,a.open_from,a.open_to,a.late_until,
                a.completion,s.submitted,s.status,s.grading_status,s.due_at,
-               s.last_modified,s.grade,s.seen_at,
+               s.last_modified,s.grade,s.seen_at,s.instructions,
+               summary.source_hash AS summary_source_hash,summary.one_line,
                p.requirement AS submission_requirement,p.reason AS submission_reason
           FROM submission s
           JOIN course c ON c.course_id=s.course_id
           LEFT JOIN activity a ON a.cmid=s.cmid
+          LEFT JOIN assignment_summary summary ON summary.cmid=s.cmid
           LEFT JOIN assignment_preference p ON p.cmid=s.cmid
          WHERE {course_sql} AND a.present=1 AND COALESCE(a.restricted,0)=0
          ORDER BY c.name,COALESCE(s.due_at,a.open_to,'9999'),
@@ -481,6 +484,9 @@ def build_daily_report(
         """,
         course_args,
     )
+    semester_assignments = [current_summary(row) for row in semester_assignments]
+    for row in semester_assignments:
+        row.pop("instructions", None)
 
     completion_by_course = _rows(
         store,
@@ -696,6 +702,7 @@ def render_report(report: DailyReport) -> str:
         + (f" · 마감 {str(r.get('due_at') or r.get('open_to'))[:16]}"
            if r.get("due_at") or r.get("open_to") else "")
         + (f" · {r['url']}" if r.get("url") else "")
+        + (f"\n  요약: {r['one_line']}" if r.get("one_line") else "")
         for r in report.semester_assignments
     ] or ["- 없음"]
 
@@ -954,6 +961,7 @@ def render_email_text(report: DailyReport) -> str:
         lines.append(
             f"- {assignment_submission_label(row)} · {row['course_name']} · {row['title']}"
             f" · 마감 {row.get('due_at') or row.get('open_to')}"
+            + (f"\n  {row['one_line']}" if row.get("one_line") else "")
             + (f"\n  {row['url']}" if row.get("url") else "")
         )
     if not due_today:
@@ -987,6 +995,7 @@ def render_email_text(report: DailyReport) -> str:
                 f"- 과제 · {row['course_name']} · {row['title']}"
                 + (f" · {_deadline_summary(row)}"
                    if row.get("due_at") or row.get("open_to") else "")
+                + (f"\n  {row['one_line']}" if row.get("one_line") else "")
             )
         todo_by_cmid = {r["cmid"]: r for r in report.todos}
         for row in report.viewing_queue:
@@ -1056,17 +1065,22 @@ def render_report_html(report: DailyReport) -> str:
             f"{esc(label)} →</a>"
         )
 
-    def item(title: str, meta: str, detail: str = "", url: str | None = None) -> str:
+    def item(title: str, meta: str, detail: str = "", url: str | None = None,
+             brief: str = "") -> str:
         detail_html = (
             f'<div style="margin-top:6px;color:#64748b;font-size:13px;line-height:1.55">{esc(detail)}</div>'
             if detail else ""
         )
         link_html = f'<div style="margin-top:8px;font-size:13px">{link(url)}</div>' if url else ""
+        brief_html = (
+            f'<div style="margin-top:6px;color:#244f82;font-size:13px;line-height:1.55">{esc(brief)}</div>'
+            if brief else ""
+        )
         return (
             '<div style="padding:14px 0;border-bottom:1px solid #e2e8f0">'
             f'<div style="font-size:12px;color:#64748b;margin-bottom:4px">{esc(meta)}</div>'
             f'<div style="font-size:15px;font-weight:700;color:#0f172a;line-height:1.45">{esc(title)}</div>'
-            f"{detail_html}{link_html}</div>"
+            f"{detail_html}{brief_html}{link_html}</div>"
         )
 
     def section(title: str, body: str, subtitle: str = "") -> str:
@@ -1105,6 +1119,7 @@ def render_report_html(report: DailyReport) -> str:
                 f"{r['course_name']} · {assignment_submission_label(r)}",
                 f"마감 {r.get('due_at') or r.get('open_to')}",
                 r.get("url"),
+                r.get("one_line") or "",
             ) for r in due_today
         ) or "확인된 오늘 마감 과제 없음",
         "22시에 다시 확인하여 오늘 마감 미제출 과제가 있으면 추가 알림을 보냅니다.",
@@ -1165,7 +1180,7 @@ def render_report_html(report: DailyReport) -> str:
     todo_by_cmid = {r["cmid"]: r for r in report.todos}
     for r in remaining_assignments:
         detail = _deadline_summary(r) if r.get("due_at") or r.get("open_to") else "마감 시간 미표시"
-        todo_parts.append(item(r["title"], f"{r['course_name']} · 미제출 과제", detail, r.get("url")))
+        todo_parts.append(item(r["title"], f"{r['course_name']} · 미제출 과제", detail, r.get("url"), r.get("one_line") or ""))
     for r in report.viewing_queue:
         todo = todo_by_cmid.get(r["cmid"], r)
         status = _video_term_status(r, report.target)

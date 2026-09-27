@@ -61,6 +61,30 @@ cache, queue state and backups in host directories across image replacement. Rea
 active during long jobs. Suspect subtitles are processed before missing recordings
 and videos, and a failed file does not stall the remaining queue.
 
+With a Gemini key in `/config/yonstudy.env` or a private `/data/store/gemini-api-key`,
+the scheduler checks `/archive/<current-term>` every ten minutes. After a reviewed
+subtitle is published, it generates or refreshes `강의요약/강좌내용요약_자동생성.md` and the
+link/overview in `강좌정보.md`, plus root-level `00_학습목차_자동생성.html`,
+`W01-00__주차학습_자동생성.html`, and flat `강의요약/01주차__..._요약.html`
+pages. New source documents go into flat `강의자료/`, while media and paired
+subtitles go into flat `강의미디어/`. The study map links old locations until the
+explicit `organize-archive` migration moves them. Only courses with changed transcript
+or weekly-summary hashes use the API; at most two summary stages run per check.
+Transcript text and derived lecture summaries are sent to Gemini.
+
+Run the migration inside the scheduler container so it updates the same SQLite
+database used by scheduled downloads. The shared `flock` prevents overlapping
+scheduled jobs and defers automatic image updates. `organize-archive` is a read-only preview
+unless `--apply` is supplied. Stop and update every transcription worker before
+moving media; `--worker-stopped` is required for that step. Normal scheduled VOD
+sync does not move existing media by itself.
+
+```bash
+sudo docker exec -e RCLONE_CONFIG=/config/rclone.conf yonstudy flock /run/yonstudy/automation.lock python /app/cli.py --store /data/store organize-archive --remote archive: --all-terms --include-media
+sudo docker exec -e RCLONE_CONFIG=/config/rclone.conf yonstudy flock /run/yonstudy/automation.lock python /app/cli.py --store /data/store organize-archive --remote archive: --all-terms --apply
+sudo docker exec -e RCLONE_CONFIG=/config/rclone.conf yonstudy flock /run/yonstudy/automation.lock python /app/cli.py --store /data/store organize-archive --remote archive: --all-terms --include-media --apply --worker-stopped
+```
+
 An LXC without nested Docker can run `systemd/yonstudy-remote-transcribe.service`
 directly with the same remote environment variables. Media decoding and ASR then
 consume only that LXC's CPU and RAM. `--update` uploads preserve a newer NAS-side edit.
@@ -76,7 +100,7 @@ archive directory.
 A file must have the same size and mtime across scans for at least 120 seconds;
 only after successful content-addressed storage is the uploaded original
 consumed from the hot folder. Failed or incomplete files remain there for a
-later retry. Matched recordings are linked into the course root under
+later retry. Matched recordings are linked into the course `강의미디어/` folder under
 `/archive`, while uncertain files go to `/archive/unmatched/recordings`.
 
 ```bash

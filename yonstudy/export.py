@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from .assignment_state import is_submission_required, submission_requirement_label
+from .assignment_summary import current_summary
 from .daily import SEOUL
 from .filename_normalization import nfc
 from .markdown_view import markdown_to_html, safe_url
@@ -73,6 +74,38 @@ def course_index_path(course: dict) -> str:
     return str(course_archive_root(course) / "강좌정보.md")
 
 
+def course_summary_path(course: dict) -> str:
+    return str(course_archive_root(course) / "강의요약" / "강좌내용요약_자동생성.md")
+
+
+def assignment_summary_path(course: dict) -> str:
+    return str(course_archive_root(course) / "과제자료" / "과제요약_자동생성.md")
+
+
+def render_assignment_summaries(course: dict, assignments: list[dict]) -> bytes | None:
+    """기존 동기화기가 건드리지 않는 별도 요약 문서."""
+    summarized = [row for row in assignments if row.get("one_line")]
+    if not summarized:
+        return None
+    lines = [
+        f"# {course.get('name') or course.get('title')} · 과제 간단 요약", "",
+        "> Gemini가 과제 명세에서 추린 내용입니다. 제출 전 원문과 최신 마감·제출 상태를 확인하세요.", "",
+    ]
+    for row in summarized:
+        title = re.sub(r"([\\`*_\[\]<>])", r"\\\1", row.get("title") or "과제")
+        lines.extend([f"## {title}", "", f"- 한 줄: {row['one_line']}"])
+        for label, key in (("제출물", "deliverables_json"), ("필수 조건", "requirements_json")):
+            values = json.loads(row.get(key) or "[]")
+            if values:
+                lines.append(f"- {label}: {'; '.join(values)}")
+        if row.get("due_at"):
+            lines.append(f"- 마감: {row['due_at']}")
+        if row.get("url"):
+            lines.append(f"- 원문: {row['url']}")
+        lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
 def assignment_spec_path(course: dict, assignment: dict, extension: str = ".md") -> str:
     from .flat_layout import canonical_filename, week_number
 
@@ -122,6 +155,8 @@ th, td { border: 1px solid #d9e0e9; padding: .55em .75em; text-align: left; vert
 .contents { border: 1px solid #dce2ea; padding: .7em 1em; border-radius: 6px; background: #f8fafc; }
 .contents ul { padding-left: 1.4em; } .contents .subsection { margin-left: 1em; }
 .collection-note { background: #fff7e8; border-left: 4px solid #bd8832; padding: .7em 1em; }
+.assignment-brief { background: #f1f7ff; border-left: 4px solid #4d83bb; padding: .8em 1.1em; margin: 1.2em 0; }
+.assignment-brief p { margin: .35em 0; } .assignment-brief ul { margin: .35em 0 .6em; }
 .assignment-list { padding: 0; list-style: none; } .assignment-list > li { border-top: 1px solid #dce2ea; padding: 1.25em 0; }
 .assignment-list h2 { margin: .2em 0 .5em; border: 0; padding: 0; font-size: 1.15rem; }
 .assignment-list .summary { margin: .4em 0; } .alternate { font-size: .88rem; }
@@ -157,11 +192,13 @@ def render_assignments_index(assignments: list[dict], *, title: str = "과제 �
         detail = f'<p class="muted">{esc(reason)} · LearnUs 상태: {esc(assignment.get("status") or "알 수 없음")}</p>' if not required else ""
         alternate = (f'<a class="alternate" href="{_reading_href(assignment["markdown_path"])}">Markdown</a>'
                      if assignment.get("markdown_path") else "")
+        brief = (f'<p class="assignment-brief">{esc(assignment["one_line"])}</p>'
+                 if assignment.get("one_line") else "")
         rows.append(
             f'<li><p class="muted">{esc(assignment.get("course_title"))}</p>'
             f'<h2><a href="{_reading_href(assignment["html_path"])}">{esc(assignment.get("title") or "제목 없음")}</a></h2>'
             f'<div class="summary"><span class="{badge}">{esc(status)}</span>'
-            f'<span>마감: {esc(assignment.get("due_at") or "알 수 없음")}</span></div>{detail}{alternate}</li>'
+            f'<span>마감: {esc(assignment.get("due_at") or "알 수 없음")}</span></div>{brief}{detail}{alternate}</li>'
         )
     content = (f'<h1>{esc(title)}</h1><p class="muted">과제 제목을 누르면 문제 설명과 제출 안내를 읽을 수 있습니다.</p>'
                + ('<ul class="assignment-list">' + "\n".join(rows) + "</ul>" if rows else "<p>수집된 과제가 없습니다.</p>"))
@@ -178,6 +215,14 @@ def assignment_index_entries(course: dict, assignments: list[dict], *, base: str
         "html_path": posixpath.relpath(assignment_spec_path(course, assignment, ".html"), base),
         "markdown_path": posixpath.relpath(assignment_spec_path(course, assignment, ".md"), base),
     } for assignment in assignments]
+
+
+def _summary_items(assignment: dict, key: str) -> list[str]:
+    try:
+        values = json.loads(assignment.get(key) or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [value for value in values if isinstance(value, str)] if isinstance(values, list) else []
 
 
 def render_assignment_markdown(course: dict, assignment: dict) -> bytes:
@@ -213,6 +258,14 @@ def render_assignment_markdown(course: dict, assignment: dict) -> bytes:
         f"- 마감: {due}",
         f"- 성적 게시: {post_date}",
         f"- 원문: {activity_url}", "",
+    ])
+    if assignment.get("one_line"):
+        metadata.extend(["## 한눈에 보기", "", assignment["one_line"], ""])
+        for label, key in (("제출물", "deliverables_json"), ("필수 조건", "requirements_json")):
+            items = _summary_items(assignment, key)
+            if items:
+                metadata.extend([f"### {label}", "", *(f"- {item}" for item in items), ""])
+    metadata.extend([
         "## 과제 명세", "",
         assignment.get("instructions") or "(본문이 없거나 수집하지 못했습니다.)", "",
     ])
@@ -284,6 +337,15 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
                   if assignment.get("index_path") else "")
     source_url = safe_url(assignment.get("url") or "")
     source_link = f'<a href="{esc(source_url)}">LearnUs에서 보기</a>' if source_url else ""
+    brief = ""
+    if assignment.get("one_line"):
+        details = "".join(
+            f'<p><strong>{label}</strong></p><ul>'
+            + "".join(f"<li>{esc(item)}</li>" for item in items) + "</ul>"
+            for label, key in (("제출물", "deliverables_json"), ("필수 조건", "requirements_json"))
+            if (items := _summary_items(assignment, key))
+        )
+        brief = f'<aside class="assignment-brief"><strong>한눈에 보기</strong><p>{esc(assignment["one_line"])}</p>{details}</aside>'
     body = f"""
 <nav>{index_link}{source_link}</nav>
 <h1>{esc(assignment.get('title') or '(제목 없음)')}</h1>
@@ -291,6 +353,7 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
 <div class="summary"><span class="{'status' if required else 'status not-required'}">{esc(status)}</span><span>마감: {esc(due)}</span></div>
 {note}
 {warning_note}
+{brief}
 <details class="metadata"><summary>과제 정보</summary>
 <ul>
 <li>과목: {esc(course.get('title') or course.get('name'))}</li>
@@ -311,7 +374,7 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
     return _reading_page(assignment.get("title") or "과제 명세", body)
 
 
-def render_course_index(course: dict, activities: list[dict]) -> bytes:
+def render_course_index(course: dict, activities: list[dict], content_summary: dict | None = None) -> bytes:
     lines = [
         f"# {course.get('name') or course.get('title') or '(강좌명 없음)'}", "",
         f"- 강좌명: {course.get('title') or course.get('name')}",
@@ -320,8 +383,15 @@ def render_course_index(course: dict, activities: list[dict]) -> bytes:
         f"- 최종 상세 동기화: {course.get('detail_synced_at') or '알 수 없음'}", "",
         "## 현재 활동", "",
     ]
+    if content_summary:
+        lines[7:7] = [
+            "## 강좌 내용 요약 (확보된 전사본 기준)", "",
+            content_summary["overview"], "",
+            f"[강의별 요약·중요한 내용 보기](강의요약/강좌내용요약_자동생성.md)", "",
+        ]
+    lines[7:7] = ["[주차별 학습목차 열기](00_학습목차_자동생성.html)", ""]
     if any(activity.get("assignment_cmid") for activity in activities):
-        lines[8:8] = ["[과제 읽기 목록](과제자료/index.html)", ""]
+        lines[lines.index("## 현재 활동"):lines.index("## 현재 활동")] = ["[과제 읽기 목록](과제자료/index.html)", ""]
     if not activities:
         lines.append("- 확인된 활동 없음")
     for activity in activities:
@@ -339,6 +409,22 @@ def render_course_index(course: dict, activities: list[dict]) -> bytes:
         )
     lines.append("")
     return "\n".join(lines).encode("utf-8")
+
+
+def course_index_body(store, course: dict) -> bytes:
+    """요약 직후 강좌 안내문을 갱신할 때 쓰는 읽기 전용 렌더러."""
+    activities = [dict(row) for row in store.query(
+        "SELECT a.cmid,a.modname,a.title,a.url,a.section_idx,a.section_name,a.completion,"
+        "s.cmid AS assignment_cmid,s.status AS submission_status,v.status AS vod_status,"
+        "pref.requirement AS submission_requirement,pref.reason AS submission_reason "
+        "FROM activity a LEFT JOIN submission s ON s.cmid=a.cmid "
+        "LEFT JOIN vod v ON v.cmid=a.cmid "
+        "LEFT JOIN assignment_preference pref ON pref.cmid=a.cmid "
+        "WHERE a.course_id=? AND a.present=1 ORDER BY a.section_idx,a.cmid",
+        (course["course_id"],),
+    )]
+    summary_rows = store.query("SELECT * FROM course_summary WHERE course_id=?", (course["course_id"],))
+    return render_course_index(course, activities, dict(summary_rows[0]) if summary_rows else None)
 
 
 def export_tree(
@@ -392,7 +478,9 @@ def export_tree(
             """,
             (course["course_id"],),
         )]
-        index_body = render_course_index(course, activities)
+        summary_rows = store.query("SELECT * FROM course_summary WHERE course_id=?", (course["course_id"],))
+        content_summary = dict(summary_rows[0]) if summary_rows else None
+        index_body = render_course_index(course, activities, content_summary)
         index_target = root / course_index_path(course)
         result.course_indexes += 1
         if not index_target.is_file() or index_target.read_bytes() != index_body:
@@ -417,12 +505,12 @@ def export_tree(
             base_name = row["name"] or f"파일_{row['cmid']}"
             if row["role"] == "resource":
                 result.material_files += 1
-                rel = Path(resource_filename(
+                rel = Path("강의자료") / resource_filename(
                     section_idx=row["section_idx"], section_name=row["section_name"],
                     activity_title=row["activity_title"], name=base_name,
                     file_id=row["id"], open_from=row["open_from"],
                     saved_at=row["saved_at"],
-                ))
+                )
             elif row["role"] == "post":
                 result.board_attachments += 1
                 board = _safe(row["activity_title"], f"게시판_{row['cmid']}")
@@ -495,15 +583,28 @@ def export_tree(
         assignments = [dict(row) for row in store.query(
             """
             SELECT s.*,a.url,a.section_idx,a.section_name,
+                   summary.source_hash AS summary_source_hash,
+                   summary.one_line,summary.deliverables_json,summary.requirements_json,
                    pref.requirement AS submission_requirement,pref.reason AS submission_reason
               FROM submission s JOIN activity a ON a.cmid=s.cmid
+              LEFT JOIN assignment_summary summary ON summary.cmid=s.cmid
               LEFT JOIN assignment_preference pref ON pref.cmid=a.cmid
              WHERE s.course_id=? AND a.present=1
              ORDER BY a.section_idx,s.cmid
             """,
             (course["course_id"],),
         )]
+        assignments = [current_summary(assignment) for assignment in assignments]
         result.assignment_specs += len(assignments)
+        summary_body = render_assignment_summaries(course, assignments)
+        if summary_body:
+            summary_target = root / assignment_summary_path(course)
+            if not summary_target.is_file() or summary_target.read_bytes() != summary_body:
+                result.copied_files += 1
+                result.copied_bytes += len(summary_body)
+                if not dry_run:
+                    summary_target.parent.mkdir(parents=True, exist_ok=True)
+                    summary_target.write_bytes(summary_body)
         for assignment in assignments:
             for extension, body in (
                 (".md", render_assignment_markdown(course, assignment)),
@@ -533,6 +634,27 @@ def export_tree(
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(body)
             term_index_entries.extend(assignment_index_entries(course, assignments, base=term))
+
+        if not dry_run and course_dir.is_dir():
+            from .lecture_pages import generated_lecture_documents
+            inventory = [path.relative_to(course_dir).as_posix() for path in course_dir.rglob("*") if path.is_file()]
+            if content_summary:
+                from .course_summary import render_course_summary
+                summary_body = render_course_summary(course, content_summary, inventory=inventory)
+                summary_target = root / course_summary_path(course)
+                if not summary_target.is_file() or summary_target.read_bytes() != summary_body:
+                    result.copied_files += 1
+                    result.copied_bytes += len(summary_body)
+                    summary_target.parent.mkdir(parents=True, exist_ok=True)
+                    summary_target.write_bytes(summary_body)
+            for relative, body in generated_lecture_documents(course, content_summary, inventory=inventory).items():
+                target = root / relative
+                if target.is_file() and target.read_bytes() == body:
+                    continue
+                result.copied_files += 1
+                result.copied_bytes += len(body)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(body)
 
     if term_index_entries:
         body = render_assignments_index(term_index_entries, title=f"{year} {semester} · 과제 읽기")

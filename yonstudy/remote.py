@@ -10,14 +10,18 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from .daily import SEOUL
+from .assignment_summary import current_summary
 from .export import (
     _safe,
     assignment_index_entries,
+    assignment_summary_path,
     assignment_spec_path,
     course_archive_root,
     course_index_path,
+    course_summary_path,
     render_assignment_html,
     render_assignment_markdown,
+    render_assignment_summaries,
     render_assignments_index,
     render_course_index,
     term_folder,
@@ -25,6 +29,8 @@ from .export import (
 from .flat_layout import (
     canonical_filename,
     lesson_number,
+    material_path,
+    media_path,
     resource_filename,
     video_filename,
     week_number,
@@ -52,6 +58,7 @@ class RemoteSyncResult:
     uploaded_bytes: int = 0
     skipped_files: int = 0
     moved_files: int = 0
+    conflict_files: int = 0
     missing_sources: int = 0
 
 
@@ -148,6 +155,7 @@ class RcloneRemote:
             self._load_term(term)[relative] = len(body)
         return True
 
+
     def upload_file(self, relative: str, source: str | Path, *, force: bool = False) -> bool:
         """큰 파일은 메모리에 올리지 않고 전송한다."""
         relative = str(PurePosixPath(relative))
@@ -178,9 +186,12 @@ class RcloneRemote:
         target = str(PurePosixPath(target))
         if source == target:
             return self.exists(target, size)
-        if self.exists(target, size):
-            return True
-        if not self.exists(source, size):
+        source_exists = self.exists(source, size)
+        target_exists = self.exists(target)
+        if target_exists:
+            # 원본과 대상이 둘 다 있으면 크기만으로 동일성을 가정하지 않는다.
+            return not self.exists(source) and self.exists(target, size)
+        if not source_exists:
             return False
         try:
             proc = subprocess.run(
@@ -234,6 +245,18 @@ class RcloneRemote:
             self.move(relative, desired, size=sidecar_size)
         return True
 
+    def rmdir_empty(self, relative: str) -> bool:
+        """검증된 빈 하위 폴더 하나만 제거한다."""
+        relative = str(PurePosixPath(relative))
+        listing = self._load_term(relative.split("/", 1)[0])
+        if any(path.startswith(relative + "/") for path in listing):
+            return False
+        proc = subprocess.run(
+            [self.exe, "rmdir", self._target(relative)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        return proc.returncode == 0
+
     def file_path(
         self, *, year: str, semester: str, course_slug: str,
         activity_title: str, file_id: int, name: str, role: str,
@@ -249,7 +272,7 @@ class RcloneRemote:
                 activity_title=activity_title, name=name, file_id=file_id,
                 open_from=open_from, saved_at=saved_at,
             )
-            parts = (term, course, filename)
+            parts = (term, course, *material_path(filename).parts)
         elif role == "post":
             parts = (term, course, "게시판_첨부", _safe(activity_title), filename)
         elif role == "submission":
@@ -272,7 +295,7 @@ class RcloneRemote:
         lesson = lesson_number(title)
         filename = video_filename(week=week, lesson=lesson, title=title, cmid=cmid)
         return str(PurePosixPath(
-            _safe(term_folder(year, semester)), _safe(course_slug), filename,
+            _safe(term_folder(year, semester)), _safe(course_slug), *media_path(filename).parts,
         ))
 
     def post_path(
@@ -285,6 +308,213 @@ class RcloneRemote:
             _safe(term_folder(year, semester)), _safe(course_slug),
             "QNA_공지", _safe(board_title), filename,
         ))
+
+
+def sync_generated_pages(store, sink: RcloneRemote, *, year: str, semester: str) -> dict:
+    """미디어·원본 자료에는 손대지 않고 생성된 학습 문서만 업로드한다."""
+    counts = {"course_indexes": 0, "course_summaries": 0,
+              "assignment_specs": 0, "assignment_indexes": 0,
+              "assignment_summaries": 0, "lecture_indexes": 0,
+              "week_summaries": 0, "lecture_summaries": 0}
+    term_entries = []
+    courses = store.query(
+        "SELECT course_id,year,semester,name,title,slug,detail_synced_at "
+        "FROM course WHERE year=? AND semester=? AND enrolled=1 ORDER BY name",
+        (year, semester),
+    )
+    for course_row in courses:
+        course = dict(course_row)
+        activities = [dict(row) for row in store.query(
+            "SELECT a.cmid,a.modname,a.title,a.url,a.section_idx,a.section_name,a.completion,"
+            "s.cmid AS assignment_cmid,s.status AS submission_status,v.status AS vod_status,"
+            "pref.requirement AS submission_requirement,pref.reason AS submission_reason "
+            "FROM activity a LEFT JOIN submission s ON s.cmid=a.cmid "
+            "LEFT JOIN vod v ON v.cmid=a.cmid "
+            "LEFT JOIN assignment_preference pref ON pref.cmid=a.cmid "
+            "WHERE a.course_id=? AND a.present=1 ORDER BY a.section_idx,a.cmid",
+            (course["course_id"],),
+        )]
+        summary_rows = store.query("SELECT * FROM course_summary WHERE course_id=?", (course["course_id"],))
+        content_summary = dict(summary_rows[0]) if summary_rows else None
+        prefix = str(course_archive_root(course)) + "/"
+        listing = sink._load_term(term_folder(year, semester)) if hasattr(sink, "_load_term") else {}
+        inventory = [path[len(prefix):] for path in listing if path.startswith(prefix)]
+        sink.upload_bytes(course_index_path(course), render_course_index(course, activities, content_summary), force=True)
+        counts["course_indexes"] += 1
+        if content_summary:
+            from .course_summary import render_course_summary
+            sink.upload_bytes(course_summary_path(course), render_course_summary(course, content_summary, inventory=inventory), force=True)
+            counts["course_summaries"] += 1
+        from .lecture_pages import generated_lecture_documents
+        for relative, body in generated_lecture_documents(course, content_summary, inventory=inventory).items():
+            sink.upload_bytes(relative, body, force=True)
+            if "/강의요약/" in relative and relative.endswith("_요약.md"):
+                counts["lecture_summaries"] += 1
+            elif "/강의요약/" not in relative and "__주차" in relative:
+                counts["week_summaries"] += 1
+            else:
+                counts["lecture_indexes"] += 1
+        assignments = [dict(row) for row in store.query(
+            "SELECT s.*,a.url,a.section_idx,a.section_name,"
+            "summary.source_hash AS summary_source_hash,summary.one_line,"
+            "summary.deliverables_json,summary.requirements_json,"
+            "pref.requirement AS submission_requirement,pref.reason AS submission_reason "
+            "FROM submission s JOIN activity a ON a.cmid=s.cmid "
+            "LEFT JOIN assignment_summary summary ON summary.cmid=s.cmid "
+            "LEFT JOIN assignment_preference pref ON pref.cmid=a.cmid "
+            "WHERE s.course_id=? AND a.present=1 ORDER BY a.section_idx,s.cmid",
+            (course["course_id"],),
+        )]
+        assignments = [current_summary(row) for row in assignments]
+        summary_body = render_assignment_summaries(course, assignments)
+        if summary_body:
+            sink.upload_bytes(assignment_summary_path(course), summary_body, force=True)
+            counts["assignment_summaries"] += 1
+        for assignment in assignments:
+            sink.upload_bytes(
+                assignment_spec_path(course, assignment, ".md"),
+                render_assignment_markdown(course, assignment), force=True,
+            )
+            sink.upload_bytes(
+                assignment_spec_path(course, assignment, ".html"),
+                render_assignment_html(course, {**assignment, "index_path": "../index.html"}),
+                force=True,
+            )
+            counts["assignment_specs"] += 1
+        if assignments:
+            index_base = str(course_archive_root(course) / "과제자료")
+            sink.upload_bytes(
+                str(PurePosixPath(index_base) / "index.html"),
+                render_assignments_index(
+                    assignment_index_entries(course, assignments, base=index_base),
+                    title=f"{course.get('title') or course.get('name')} · 과제 읽기",
+                ), force=True,
+            )
+            counts["assignment_indexes"] += 1
+            term_entries.extend(assignment_index_entries(
+                course, assignments, base=_safe(term_folder(year, semester)),
+            ))
+    if term_entries:
+        sink.upload_bytes(
+            str(PurePosixPath(_safe(term_folder(year, semester))) / "과제목록.html"),
+            render_assignments_index(term_entries, title=f"{year} {semester} · 과제 읽기"),
+            force=True,
+        )
+        counts["assignment_indexes"] += 1
+    return counts
+
+
+def sync_study_maps(
+    store, sink: RcloneRemote, *, year: str, semester: str, dry_run: bool = False,
+) -> dict:
+    """이미 저장된 한 학기 전체 자료를 색인한다. 원본 파일은 변경하지 않는다."""
+    from .lecture_pages import generated_lecture_documents
+
+    term = term_folder(year, semester)
+    listing = sink._load_term(term)
+    result = {"term": term, "courses": 0, "source_files": 0, "study_pages": 0}
+    for row in store.query(
+        "SELECT course_id,year,semester,name,title,slug FROM course "
+        "WHERE year=? AND semester=? AND enrolled=1 ORDER BY name",
+        (year, semester),
+    ):
+        course = dict(row)
+        prefix = str(course_archive_root(course)) + "/"
+        inventory = [path[len(prefix):] for path in listing if path.startswith(prefix)]
+        if not inventory:
+            continue
+        summary_rows = store.query("SELECT * FROM course_summary WHERE course_id=?", (course["course_id"],))
+        summary = dict(summary_rows[0]) if summary_rows else None
+        documents = generated_lecture_documents(course, summary, inventory=inventory)
+        result["courses"] += 1
+        result["source_files"] += len(inventory)
+        result["study_pages"] += len(documents) + 1 + bool(summary)
+        if not dry_run:
+            from .export import course_index_body
+            sink.upload_bytes(course_index_path(course), course_index_body(store, course), force=True)
+            if summary:
+                from .course_summary import render_course_summary
+                sink.upload_bytes(course_summary_path(course), render_course_summary(course, summary, inventory=inventory), force=True)
+            for relative, body in documents.items():
+                sink.upload_bytes(relative, body, force=True)
+    return result
+
+
+def organize_remote_archive(
+    store, sink: RcloneRemote, *, year: str, semester: str,
+    dry_run: bool = True, include_media: bool = False,
+) -> dict:
+    """원격 원본을 종류별 한 단계 폴더로 이동하고 DB·학습 링크를 맞춘다."""
+    from collections import Counter
+    from .archive_layout import move_conflicts, plan_course_moves
+
+    term = term_folder(year, semester)
+    listing = sink._load_term(term)
+    courses = [dict(row) for row in store.query(
+        "SELECT course_id,year,semester,name,title,slug FROM course "
+        "WHERE year=? AND semester=? AND enrolled=1 ORDER BY name",
+        (year, semester),
+    )]
+    planned = [move for course in courses for move in plan_course_moves(
+        course, listing, include_media=include_media,
+    )]
+    conflicts = move_conflicts(planned, listing)
+    result = {
+        "term": term, "courses": len(courses), "planned": dict(Counter(move.kind for move in planned)),
+        "conflicts": len(conflicts), "conflict_examples": [move.source for move in conflicts[:10]],
+        "moved": 0, "backed_up": 0, "skipped": 0, "empty_dirs_removed": 0,
+    }
+    if dry_run or conflicts:
+        return result
+
+    for move in planned:
+        if move.kind == "generated-backup":
+            continue
+        if not sink.move(move.source, move.target, size=move.size):
+            result["skipped"] += 1
+            continue
+        store.db.execute(
+            "UPDATE file SET remote_path=? WHERE course_id IN "
+            "(SELECT course_id FROM course WHERE year=? AND semester=?) AND remote_path=?",
+            (move.target, year, semester, move.source),
+        )
+        if move.kind == "media":
+            for recording in store.query("SELECT id,path FROM recording WHERE path IS NOT NULL"):
+                old_path = recording["path"]
+                if old_path == move.source or old_path.endswith("/" + move.source):
+                    prefix = old_path[:-len(move.source)]
+                    store.db.execute(
+                        "UPDATE recording SET path=? WHERE id=?",
+                        (prefix + move.target, recording["id"]),
+                    )
+        store.commit()
+        result["moved"] += 1
+
+    # 주차별 자료 폴더가 비었다면 그 폴더만 제거한다. 다른 사용자 폴더는 건드리지 않는다.
+    old_week_dirs = {
+        str(PurePosixPath(move.source).parent)
+        for move in planned if move.kind == "material" and "/강의자료/" in move.source
+        and PurePosixPath(move.source).parent != PurePosixPath(move.target).parent
+    }
+    remove_empty = getattr(sink, "rmdir_empty", None)
+    if remove_empty is not None:
+        for directory in sorted(old_week_dirs, key=lambda path: (-path.count("/"), path)):
+            if remove_empty(directory):
+                result["empty_dirs_removed"] += 1
+
+    # 새 요약 문서와 링크를 먼저 게시한 뒤에만 이전 루트 Markdown을 백업한다.
+    sync_study_maps(store, sink, year=year, semester=semester)
+    listing = sink._load_term(term)
+    for move in planned:
+        if move.kind != "generated-backup":
+            continue
+        course_root = move.source.rsplit("/", 1)[0]
+        current = course_root + "/강의요약/" + PurePosixPath(move.source).name
+        if current not in listing or not sink.move(move.source, move.target, size=move.size):
+            result["skipped"] += 1
+            continue
+        result["backed_up"] += 1
+    return result
 
 
 def sync_remote_tree(
@@ -321,7 +551,9 @@ def sync_remote_tree(
             """,
             (course["course_id"],),
         )]
-        index_body = render_course_index(course, activities)
+        summary_rows = store.query("SELECT * FROM course_summary WHERE course_id=?", (course["course_id"],))
+        content_summary = dict(summary_rows[0]) if summary_rows else None
+        index_body = render_course_index(course, activities, content_summary)
         if sink.upload_bytes(course_index_path(course), index_body, force=True):
             result.uploaded_files += 1
             result.uploaded_bytes += len(index_body)
@@ -358,18 +590,28 @@ def sync_remote_tree(
                 section_name=row["section_name"], open_from=row["open_from"],
                 saved_at=row["saved_at"],
             )
-            # 강의 자료는 예전 `강의자료/ID_이름` 경로를 재사용하지 않고
-            # 과목 루트의 주차 접두어 경로로 한 번만 이동한다.
+            # 예전 경로의 강의 자료는 새 평면 `강의자료/` 보관함으로 한 번만 이동한다.
             previous = row["remote_path"]
             if role == "resource" and previous and previous != desired:
                 if sink.move(previous, desired, size=row["bytes"]):
                     store.update_file_remote(row["url"], role, desired, "ok")
                     result.moved_files += 1
                     continue
+                if sink.exists(previous, row["bytes"]):
+                    result.skipped_files += 1
+                    continue
+                if sink.exists(desired):
+                    result.conflict_files += 1
+                    store.log("archive_layout", str(row["id"]), False, f"대상 경로에 다른 크기의 파일이 있습니다: {desired}")
+                    continue
             relative = desired if role == "resource" else (previous or desired)
             if sink.exists(relative, row["bytes"]):
                 store.update_file_remote(row["url"], role, relative, "ok")
                 result.skipped_files += 1
+                continue
+            if sink.exists(relative):
+                result.conflict_files += 1
+                store.log("remote_sync", str(row["id"]), False, f"대상 경로에 다른 크기의 파일이 있습니다: {relative}")
                 continue
             source = store.blob_path(row["sha256"]) if row["sha256"] else None
             if source is None or not source.is_file():
@@ -422,15 +664,26 @@ def sync_remote_tree(
         assignments = [dict(row) for row in store.query(
             """
             SELECT s.*,a.url,a.section_idx,a.section_name,
+                   summary.source_hash AS summary_source_hash,
+                   summary.one_line,summary.deliverables_json,summary.requirements_json,
                    pref.requirement AS submission_requirement,pref.reason AS submission_reason
               FROM submission s JOIN activity a ON a.cmid=s.cmid
+              LEFT JOIN assignment_summary summary ON summary.cmid=s.cmid
               LEFT JOIN assignment_preference pref ON pref.cmid=a.cmid
              WHERE s.course_id=? AND a.present=1
              ORDER BY a.section_idx,s.cmid
             """,
             (course["course_id"],),
         )]
+        assignments = [current_summary(assignment) for assignment in assignments]
         result.assignment_specs += len(assignments)
+        summary_body = render_assignment_summaries(course, assignments)
+        if summary_body:
+            if sink.upload_bytes(assignment_summary_path(course), summary_body, force=True):
+                result.uploaded_files += 1
+                result.uploaded_bytes += len(summary_body)
+            else:
+                result.skipped_files += 1
         for assignment in assignments:
             for extension, body in (
                 (".md", render_assignment_markdown(course, assignment)),
@@ -460,6 +713,25 @@ def sync_remote_tree(
             term_index_entries.extend(assignment_index_entries(
                 course, assignments, base=_safe(term_folder(year, semester))
             ))
+
+        from .lecture_pages import generated_lecture_documents
+        prefix = str(course_archive_root(course)) + "/"
+        listing = sink._load_term(term_folder(year, semester)) if hasattr(sink, "_load_term") else {}
+        inventory = [path[len(prefix):] for path in listing if path.startswith(prefix)]
+        if content_summary:
+            from .course_summary import render_course_summary
+            summary_body = render_course_summary(course, content_summary, inventory=inventory)
+            if sink.upload_bytes(course_summary_path(course), summary_body, force=True):
+                result.uploaded_files += 1
+                result.uploaded_bytes += len(summary_body)
+            else:
+                result.skipped_files += 1
+        for relative, body in generated_lecture_documents(course, content_summary, inventory=inventory).items():
+            if sink.upload_bytes(relative, body, force=True):
+                result.uploaded_files += 1
+                result.uploaded_bytes += len(body)
+            else:
+                result.skipped_files += 1
 
     if term_index_entries:
         body = render_assignments_index(term_index_entries, title=f"{year} {semester} · 과제 읽기")

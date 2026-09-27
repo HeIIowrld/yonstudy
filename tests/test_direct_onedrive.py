@@ -22,7 +22,7 @@ class FakeSink:
             name=values["name"], file_id=values["file_id"],
             open_from=values.get("open_from"), saved_at=values.get("saved_at"),
         )
-        return f"2026-2/{values['course_slug']}/{filename}"
+        return f"2026-2/{values['course_slug']}/강의자료/{filename}"
 
     def exists(self, relative, size=None):
         return relative in self.files and (size is None or len(self.files[relative]) == size)
@@ -40,7 +40,7 @@ class FailingSink(FakeSink):
 
 
 class DirectOneDriveArchiveTests(unittest.TestCase):
-    def test_real_sink_puts_week_prefixed_material_in_course_root(self):
+    def test_real_sink_puts_week_prefixed_material_in_flat_shelf(self):
         sink = object.__new__(RcloneOneDrive)
         path = sink.file_path(
             year="2026", semester="2학기", course_slug="TST1000_테스트",
@@ -49,10 +49,10 @@ class DirectOneDriveArchiveTests(unittest.TestCase):
         )
         self.assertEqual(
             path,
-            "2026-2/TST1000_테스트/W01-L02__강의자료__Lecture02__f1407.pdf",
+            "2026-2/TST1000_테스트/강의자료/W01-L02__강의자료__Lecture02__f1407.pdf",
         )
 
-    def test_real_sink_puts_archive_only_video_in_course_root(self):
+    def test_real_sink_puts_archive_only_video_in_media_shelf(self):
         sink = object.__new__(RcloneOneDrive)
         path = sink.video_path(
             year="2026", semester="2학기", course_slug="CAS3116_컴퓨터비젼",
@@ -61,7 +61,7 @@ class DirectOneDriveArchiveTests(unittest.TestCase):
         )
         self.assertEqual(
             path,
-            "2026-2/CAS3116_컴퓨터비젼/"
+            "2026-2/CAS3116_컴퓨터비젼/강의미디어/"
             "01주차 - Lec 1 - 9_1 (4538981).mp4",
         )
 
@@ -117,6 +117,22 @@ class DirectOneDriveArchiveTests(unittest.TestCase):
         self.assertFalse(sink.move_media(old, new, size=100))
         sink.move.assert_not_called()
 
+    def test_existing_target_does_not_silently_replace_original(self):
+        sink = object.__new__(RcloneOneDrive)
+        source = "2026-2/TST/slides.pdf"
+        target = "2026-2/TST/강의자료/slides.pdf"
+        sink._listings = {"2026-2": {source: 100, target: 100}}
+        self.assertFalse(sink.move(source, target, size=100))
+        self.assertIn(source, sink._listings["2026-2"])
+
+    def test_wrong_sized_target_is_also_preserved(self):
+        sink = object.__new__(RcloneOneDrive)
+        source = "2026-2/TST/slides.pdf"
+        target = "2026-2/TST/강의자료/slides.pdf"
+        sink._listings = {"2026-2": {source: 100, target: 75}}
+        self.assertFalse(sink.move(source, target, size=100))
+        self.assertEqual(sink._listings["2026-2"][target], 75)
+
     def test_file_goes_to_sink_without_local_blob_or_course_copy(self):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
@@ -137,7 +153,7 @@ class DirectOneDriveArchiveTests(unittest.TestCase):
             record = store.file_record("https://example.test/1", "resource")
 
             self.assertEqual(record["remote_status"], "ok")
-            self.assertNotIn("/강의자료/", record["remote_path"])
+            self.assertIn("/강의자료/", record["remote_path"])
             self.assertIn("/W01-L02__강의자료__", record["remote_path"])
             self.assertEqual(record["bytes"], len(b"lecture material"))
             self.assertEqual(sink.files[record["remote_path"]], b"lecture material")

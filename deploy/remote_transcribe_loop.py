@@ -46,8 +46,9 @@ def _read_reprocess(path: Path) -> set[str]:
 
 
 def pull_archive(remote: str, local_root: Path) -> None:
+    """전용 로컬 캐시를 NAS 미디어 목록과 맞춰 옛 경로의 중복을 제거한다."""
     local_root.mkdir(parents=True, exist_ok=True)
-    command = ["rclone", "copy", remote, str(local_root), "--update", "--create-empty-src-dirs"]
+    command = ["rclone", "sync", remote, str(local_root), "--update", "--delete-after"]
     for pattern in MEDIA_PATTERNS:
         command += ["--filter", f"+ {pattern}"]
     command += ["--filter", "- *", "--checkers", "4", "--transfers", "2"]
@@ -59,9 +60,19 @@ def push_results(remote: str, remote_state: str, local_root: Path, state_dir: Pa
     state_path = state_dir / "state.json"
     if state_path.is_file():
         state = json.loads(state_path.read_text(encoding="utf-8"))
+        # 이동된 원본의 옛 상태가 남아 있어도 옛 자막 경로를 다시 만들지 않는다.
+        remote_media = None
         for item in state.get("items", {}).values():
             relative = item.get("subtitle")
             if item.get("status") != "completed" or item.get("completed_model") != model_id or not relative:
+                continue
+            if remote_media is None:
+                listing = subprocess.run(
+                    ["rclone", "lsf", remote, "--recursive", "--files-only"],
+                    capture_output=True, text=True, check=True,
+                )
+                remote_media = set(listing.stdout.splitlines())
+            if item.get("media") not in remote_media:
                 continue
             source = local_root / relative
             if source.is_file():

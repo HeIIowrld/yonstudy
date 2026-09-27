@@ -44,6 +44,7 @@ def run_daily_automation(
         "year": year,
         "semester": semester,
         "sync": {"status": "skipped"},
+        "summaries": {"status": "skipped"},
         "export": {},
         "upload": {},
         "video_archive": {"status": "skipped"},
@@ -100,6 +101,30 @@ def run_daily_automation(
         except Exception as exc:
             state["sync"] = {"status": "error", "message": str(exc)}
             exit_code = 1
+
+    from .assignment_summary import api_key_for_store
+
+    try:
+        api_key = api_key_for_store(store_path)
+    except (OSError, ValueError) as exc:
+        api_key = None
+        state["summaries"] = {"status": "error", "message": str(exc)}
+    if api_key and not dry_run:
+        from .assignment_summary import DEFAULT_MODEL, summarize_assignments
+
+        try:
+            limit = int(os.environ.get("YONSTUDY_SUMMARY_LIMIT", "10"))
+            result = summarize_assignments(
+                store, api_key=api_key,
+                model=os.environ.get("YONSTUDY_SUMMARY_MODEL", DEFAULT_MODEL),
+                year=year, semester=semester, limit=limit,
+            )
+            state["summaries"] = {
+                "status": "partial" if result.failed else "ok",
+                **asdict(result),
+            }
+        except (OSError, ValueError) as exc:
+            state["summaries"] = {"status": "error", "message": str(exc)}
 
     if upload_remote:
         state["export"] = {

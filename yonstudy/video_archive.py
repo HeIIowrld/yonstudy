@@ -69,7 +69,8 @@ def _sha256(path: Path) -> str:
 def archive_course_vods(
     store, sink, *, year: str, semester: str,
     course_ids: set[int] | None = None, limit: int | None = None,
-    client=None, dry_run: bool = False, download_fn=V.download,
+    client=None, dry_run: bool = False, migrate_existing: bool = False,
+    download_fn=V.download,
 ) -> VideoArchiveResult:
     """현재 학기에서 접근 가능한 VOD를 임시 MP4로 받아 원격 저장소에 전송한다.
 
@@ -108,7 +109,10 @@ def archive_course_vods(
         existing = store.file_record(stable_url, "video")
         expected_size = existing["bytes"] if existing else None
         previous = existing["remote_path"] if existing else None
-        if previous and previous != remote_path:
+        if previous and previous != remote_path and sink.exists(previous, expected_size):
+            if not migrate_existing:
+                result.skipped_files += 1
+                continue
             mover = getattr(sink, "move_media", None) or getattr(sink, "move", None)
             if mover is not None:
                 try:

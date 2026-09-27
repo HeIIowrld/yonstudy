@@ -285,6 +285,115 @@ def cmd_assignment_status(args) -> int:
     return 0
 
 
+def cmd_summarize_assignments(args) -> int:
+    """수집된 과제 본문에서 변경된 요약만 생성한다."""
+    from yonstudy.assignment_summary import DEFAULT_MODEL, api_key_for_store, summarize_assignments
+    from yonstudy.daily import SEOUL, current_term
+
+    if args.all_terms or args.cmid is not None:
+        year, semester = args.year, args.semester
+    else:
+        default_year, default_semester = current_term(datetime.now(SEOUL).date())
+        year = args.year or default_year
+        semester = args.semester or default_semester
+    try:
+        result = summarize_assignments(
+            Store(args.store), api_key=api_key_for_store(args.store),
+            model=os.environ.get("YONSTUDY_SUMMARY_MODEL", DEFAULT_MODEL),
+            year=year, semester=semester, cmid=args.cmid,
+            limit=args.limit, dry_run=args.dry_run,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(
+        f"요약 대상 {result.pending}개 · 생성 {result.generated}개 · "
+        f"기존 캐시 {result.skipped}개 · 실패 {result.failed}개"
+    )
+    if args.dry_run and result.sample_cmids:
+        print("처리 예정 cmid: " + ", ".join(map(str, result.sample_cmids)))
+    for error in result.errors:
+        print(error, file=sys.stderr)
+    return 1 if result.failed else 0
+
+
+def cmd_summarize_courses(args) -> int:
+    """강좌별 전사본에서 강의별·강좌 전체 요약을 만들고 아카이브에 게시한다."""
+    import tempfile
+
+    from yonstudy.assignment_summary import DEFAULT_MODEL, api_key_for_store
+    from yonstudy.course_summary import fetch_remote_transcripts, render_course_summary, summarize_courses
+    from yonstudy.daily import SEOUL, current_term
+    from yonstudy.export import course_archive_root, course_index_body, course_index_path, course_summary_path, term_folder
+    from yonstudy.lecture_pages import generated_lecture_documents
+    from yonstudy.remote import RcloneRemote, RemoteStorageError
+
+    default_year, default_semester = current_term(datetime.now(SEOUL).date())
+    year, semester = args.year or default_year, args.semester or default_semester
+    term = term_folder(year, semester)
+    remote = args.remote.rstrip("/") if args.remote else None
+    transcripts_dir = Path(args.transcripts_dir) if args.transcripts_dir else (
+        Path(args.store) / "remote_transcripts" / term if remote else Path("/archive") / term
+    )
+    temp_cache = tempfile.TemporaryDirectory() if remote and args.dry_run else None
+    if temp_cache:
+        transcripts_dir = Path(temp_cache.name)
+    try:
+        if remote:
+            fetch_remote_transcripts(remote, transcripts_dir, year=year, semester=semester)
+        if not transcripts_dir.is_dir():
+            raise FileNotFoundError(f"전사본 폴더가 없습니다: {transcripts_dir}")
+        store = Store(args.store)
+        result = summarize_courses(
+            store, transcripts_dir, api_key=api_key_for_store(args.store),
+            year=year, semester=semester,
+            model=os.environ.get("YONSTUDY_SUMMARY_MODEL", DEFAULT_MODEL),
+            limit=args.limit, dry_run=args.dry_run,
+        )
+        print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
+        if args.dry_run:
+            return 0
+        if not (result.generated or result.weeks_generated or result.metadata_updates):
+            return 1 if result.failed or result.weeks_failed else 0
+        sink = RcloneRemote(remote) if remote else None
+        for course_row in store.query(
+            "SELECT course_id,year,semester,name,title,slug,detail_synced_at FROM course "
+            "WHERE year=? AND semester=? AND enrolled=1", (year, semester),
+        ):
+            course = dict(course_row)
+            summary_rows = store.query("SELECT * FROM course_summary WHERE course_id=?", (course["course_id"],))
+            if not summary_rows:
+                continue
+            summary = dict(summary_rows[0])
+            if sink:
+                prefix = str(course_archive_root(course)) + "/"
+                inventory = [path[len(prefix):] for path in sink._load_term(term) if path.startswith(prefix)]
+            else:
+                course_dir = transcripts_dir / Path(course_archive_root(course)).name
+                inventory = [path.relative_to(course_dir).as_posix() for path in course_dir.rglob("*") if path.is_file()]
+            documents = {
+                course_summary_path(course): render_course_summary(course, summary, inventory=inventory),
+                **generated_lecture_documents(course, summary, inventory=inventory),
+                course_index_path(course): course_index_body(store, course),
+            }
+            if sink:
+                for relative, body in documents.items():
+                    sink.upload_bytes(relative, body, force=True)
+            else:
+                for relative, body in documents.items():
+                    target = transcripts_dir.parent / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.is_file() or target.read_bytes() != body:
+                        target.write_bytes(body)
+        return 1 if result.failed or result.weeks_failed else 0
+    except (OSError, ValueError, RemoteStorageError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    finally:
+        if temp_cache:
+            temp_cache.cleanup()
+
+
 def cmd_normalize_names(args) -> int:
     """기존 아카이브의 macOS 분해형 파일명을 NFC로 복구한다."""
     from yonstudy.filename_normalization import normalize_tree
@@ -486,6 +595,27 @@ def cmd_report(args) -> int:
         if assignment_errors:
             print("제출 상태 일부 확인 실패:", assignment_errors, file=sys.stderr)
 
+    from yonstudy.assignment_summary import api_key_for_store
+
+    try:
+        api_key = api_key_for_store(args.store)
+    except (OSError, ValueError) as exc:
+        print(f"과제 요약 설정 오류: {exc}", file=sys.stderr)
+        api_key = None
+    if api_key and (sync_needed or getattr(args, "refresh_assignments", False)):
+        from yonstudy.assignment_summary import DEFAULT_MODEL, summarize_assignments
+
+        try:
+            summaries = summarize_assignments(
+                store, api_key=api_key,
+                model=os.environ.get("YONSTUDY_SUMMARY_MODEL", DEFAULT_MODEL),
+                year=year, semester=semester, limit=5,
+            )
+            if summaries.failed:
+                print("과제 요약 일부 실패: " + "; ".join(summaries.errors), file=sys.stderr)
+        except ValueError as exc:
+            print(f"과제 요약 설정 오류: {exc}", file=sys.stderr)
+
     report = build_daily_report(
         store,
         target=target,
@@ -645,7 +775,78 @@ def cmd_upload(args) -> int:
         results if len(results) != 1 else results[0],
         ensure_ascii=False, indent=2,
     ))
-    return 1 if any(result["missing_sources"] for result in results) else 0
+    return 1 if any(result["missing_sources"] or result["conflict_files"] for result in results) else 0
+
+
+def cmd_upload_generated(args) -> int:
+    """생성된 과제·강좌 요약 문서만 원격 저장소에 반영한다."""
+    from yonstudy.daily import SEOUL, current_term
+    from yonstudy.remote import RcloneRemote, RemoteStorageError, sync_generated_pages
+
+    default_year, default_semester = current_term(datetime.now(SEOUL).date())
+    year, semester = args.year or default_year, args.semester or default_semester
+    try:
+        result = sync_generated_pages(
+            Store(args.store), RcloneRemote(args.remote), year=year, semester=semester,
+        )
+    except (OSError, ValueError, RemoteStorageError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_study_map(args) -> int:
+    """기존 원격 아카이브까지 주차별 학습목차를 만들거나 미리 본다."""
+    from yonstudy.daily import SEOUL, current_term
+    from yonstudy.remote import RcloneRemote, RemoteStorageError, sync_study_maps
+
+    store = Store(args.store)
+    if args.all_terms:
+        terms = [(row["year"], row["semester"]) for row in store.query(
+            "SELECT DISTINCT year,semester FROM course WHERE enrolled=1 ORDER BY year,semester"
+        )]
+    else:
+        default_year, default_semester = current_term(datetime.now(SEOUL).date())
+        terms = [(args.year or default_year, args.semester or default_semester)]
+    try:
+        sink = RcloneRemote(args.remote)
+        results = [sync_study_maps(store, sink, year=year, semester=semester, dry_run=args.dry_run)
+                   for year, semester in terms]
+    except (OSError, ValueError, RemoteStorageError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(results if args.all_terms else results[0], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_organize_archive(args) -> int:
+    """기존 NAS 강좌 파일을 종류별 평면 폴더로 안전하게 재배치한다."""
+    from yonstudy.daily import SEOUL, current_term
+    from yonstudy.remote import RcloneRemote, RemoteStorageError, organize_remote_archive
+
+    if args.apply and args.include_media and not args.worker_stopped:
+        print("미디어 이동 전 원격 전사 작업자를 중지하고 --worker-stopped를 지정하세요.", file=sys.stderr)
+        return 2
+    store = Store(args.store)
+    if args.all_terms:
+        terms = [(row["year"], row["semester"]) for row in store.query(
+            "SELECT DISTINCT year,semester FROM course WHERE enrolled=1 ORDER BY year,semester"
+        )]
+    else:
+        default_year, default_semester = current_term(datetime.now(SEOUL).date())
+        terms = [(args.year or default_year, args.semester or default_semester)]
+    try:
+        sink = RcloneRemote(args.remote)
+        results = [organize_remote_archive(
+            store, sink, year=year, semester=semester,
+            dry_run=not args.apply, include_media=args.include_media,
+        ) for year, semester in terms]
+    except (OSError, ValueError, RemoteStorageError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(results if args.all_terms else results[0], ensure_ascii=False, indent=2))
+    return 1 if any(row["conflicts"] or row["skipped"] for row in results) else 0
 
 
 def cmd_automate(args) -> int:
@@ -1039,6 +1240,27 @@ def main() -> int:
     assignment_status.add_argument("--semester")
     assignment_status.add_argument("--all-terms", action="store_true")
     assignment_status.set_defaults(fn=cmd_assignment_status)
+    summaries = sub.add_parser(
+        "summarize-assignments", help="Gemini로 과제 명세 한 줄 요약 생성·갱신",
+    )
+    summaries.add_argument("cmid", nargs="?", type=int, help="특정 과제 ID")
+    summaries.add_argument("--year")
+    summaries.add_argument("--semester")
+    summaries.add_argument("--all-terms", action="store_true")
+    summaries.add_argument("--limit", type=int, default=10,
+                           help="이번 실행에서 생성할 최대 개수 (0이면 전체, 기본 10)")
+    summaries.add_argument("--dry-run", action="store_true", help="API 호출 없이 요약 대상만 확인")
+    summaries.set_defaults(fn=cmd_summarize_assignments)
+    course_summaries = sub.add_parser(
+        "summarize-courses", help="전사본 기준 강좌·강의별 Gemini 요약 생성·게시",
+    )
+    course_summaries.add_argument("--year")
+    course_summaries.add_argument("--semester")
+    course_summaries.add_argument("--transcripts-dir", help="학기별 전사본 폴더 (기본 /archive/<학기>)")
+    course_summaries.add_argument("--remote", help="rclone 원격 아카이브 루트 (설정하면 전사본을 가져와 요약을 다시 업로드)")
+    course_summaries.add_argument("--limit", type=int, default=0, help="이번 실행에서 생성할 강좌 수 (0이면 전체)")
+    course_summaries.add_argument("--dry-run", action="store_true")
+    course_summaries.set_defaults(fn=cmd_summarize_courses)
     normalize_names = sub.add_parser(
         "normalize-names",
         help="macOS에서 분리된 한글 파일·폴더명을 Windows용 NFC로 복구",
@@ -1119,6 +1341,30 @@ def main() -> int:
     upload.add_argument("--all-terms", action="store_true", help="DB의 모든 학기를 업로드")
     upload.add_argument("--dry-run", action="store_true")
     upload.set_defaults(fn=cmd_upload)
+
+    generated = sub.add_parser("upload-generated", help="요약·과제 문서만 원격 저장소에 업로드")
+    generated.add_argument("--remote", default=DEFAULT_REMOTE)
+    generated.add_argument("--year")
+    generated.add_argument("--semester")
+    generated.set_defaults(fn=cmd_upload_generated)
+
+    study_map = sub.add_parser("study-map", help="기존 원격 자료를 포함한 주차별 학습목차 생성")
+    study_map.add_argument("--remote", default=DEFAULT_REMOTE)
+    study_map.add_argument("--year")
+    study_map.add_argument("--semester")
+    study_map.add_argument("--all-terms", action="store_true", help="아카이브된 모든 학기")
+    study_map.add_argument("--dry-run", action="store_true")
+    study_map.set_defaults(fn=cmd_study_map)
+
+    layout = sub.add_parser("organize-archive", help="기존 자료·미디어를 종류별 평면 폴더로 이동")
+    layout.add_argument("--remote", default=DEFAULT_REMOTE)
+    layout.add_argument("--year")
+    layout.add_argument("--semester")
+    layout.add_argument("--all-terms", action="store_true")
+    layout.add_argument("--apply", action="store_true", help="미리보기 후 실제 이동")
+    layout.add_argument("--include-media", action="store_true", help="영상·녹음·자막도 이동")
+    layout.add_argument("--worker-stopped", action="store_true", help="원격 전사 작업자가 중지됨을 확인")
+    layout.set_defaults(fn=cmd_organize_archive)
 
     auto = sub.add_parser("automate", help="동기화·원격 백업·메일 리포트 일괄 실행")
     auto.add_argument("--destination", default=DEFAULT_EXPORT)

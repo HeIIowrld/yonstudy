@@ -285,7 +285,7 @@ end = "10:50"
         row = self.store.query("SELECT path FROM recording")[0]
         target = Path(row["path"])
         self.assertTrue(target.is_absolute())
-        self.assertEqual(target.parts[-3:-1], ("2026-2", "CSI2102_데이터베이스"))
+        self.assertEqual(target.parts[-4:-1], ("2026-2", "CSI2102_데이터베이스", "강의미디어"))
         self.assertTrue(target.name.startswith("W02-L01__강의녹음__20260908_1015__r"))
         self.assertEqual(target.read_bytes(), b"consume me")
         for suffix, body in subtitles.items():

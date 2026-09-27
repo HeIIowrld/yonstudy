@@ -18,5 +18,7 @@ YONSTUDY_BROWSER_CHANNEL=chrome
 
 # Archive materials every six hours. The 06:10 run prepares the 09:00 report.
 10 */6 * * * root /app/deploy/run-job.sh daily
+# 전사본이 추가·변경되면 강좌·강의 요약을 증분 갱신한다 (키 미설정 시 생략).
+*/10 * * * * root /app/deploy/run-job.sh course-summaries
 0 9 * * * root /app/deploy/run-job.sh report
 0 22 * * * root /app/deploy/run-job.sh deadline-reminder

@@ -94,6 +94,16 @@ assignment_preference (cmid PK, requirement, reason, updated_at)
              -- 개인 제출 필요 여부: not_required. 행이 없으면 사이트 상태로 판단.
              -- 수집기가 갱신하는 submission/completion과 분리해 재수집에도 유지한다.
 
+assignment_summary (cmid PK, source_hash, one_line, deliverables_json,
+                    requirements_json, model, prompt_version, generated_at)
+             -- 선택적 Gemini 요약. 원문 해시가 달라지면 렌더링에서 숨기고 재생성한다.
+
+course_summary (course_id PK, source_hash, overview, topics_json, lectures_json,
+                sources_json, model, prompt_version, generated_at,
+                weeks_json, weeks_source_hash, week_model, week_prompt_version,
+                weeks_generated_at)
+             -- 강좌 전사본 요약과 강의별 요약을 바탕으로 합성한 주차별 요약.
+
 post        (id PK, course_id, cmid, modname, post_id, thread_id,
              no, subject, writer, written_at, hits, replies, url, body,
              fetched_at, checked_at)

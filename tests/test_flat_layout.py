@@ -56,7 +56,7 @@ class FlatLayoutTests(unittest.TestCase):
             "02주차 - Week 2 Lecture Video (4549918).mp4",
         )
 
-    def test_plan_keeps_only_term_and_course_directories(self):
+    def test_plan_uses_one_material_shelf_without_week_directories(self):
         with tempfile.TemporaryDirectory() as temp:
             store = Store(temp)
             store.save_course({
@@ -76,8 +76,9 @@ class FlatLayoutTests(unittest.TestCase):
             plan = build_flat_plan(store, destination="/archive", year="2026", semester="2학기")
             self.assertEqual(len(plan), 1)
             path = Path(plan[0].relative_path)
-            self.assertEqual(len(path.parts), 3)
+            self.assertEqual(len(path.parts), 4)
             self.assertEqual(path.parts[:2], ("2026-2", "TST1000_테스트"))
+            self.assertEqual(path.parts[2], "강의자료")
             self.assertTrue(path.name.startswith("W01-L02__강의자료__"))
 
 

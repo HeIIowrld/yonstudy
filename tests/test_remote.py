@@ -67,6 +67,9 @@ class RcloneRemoteTests(unittest.TestCase):
                 self.files[relative] = body
                 return True
 
+            def _load_term(self, term):
+                return {path: len(body) for path, body in self.files.items() if path.startswith(term + "/")}
+
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
             store.save_course({
@@ -100,12 +103,13 @@ class RcloneRemoteTests(unittest.TestCase):
                 store, remote, year="2026", semester="2학기"
             )
 
-            self.assertEqual(result.uploaded_files, 2)
+            self.assertGreaterEqual(result.uploaded_files, 2)
             self.assertEqual(remote.uploaded_from, store.blob_path(digest))
             self.assertEqual(
                 remote.files["2026-2/TST_테스트/lecture.pdf"], b"lecture"
             )
             self.assertIn("2026-2/TST_테스트/강좌정보.md", remote.files)
+            self.assertIn("lecture.pdf", remote.files["2026-2/TST_테스트/강의요약/W99-00__주차미확인_자동생성.md"].decode())
 
     def test_assignment_body_and_metadata_are_archived_without_attachment(self):
         class MemoryRemote:

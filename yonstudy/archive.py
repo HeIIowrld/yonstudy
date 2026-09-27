@@ -967,6 +967,13 @@ class Archiver:
             if move is not None and move(previous, desired, size=existing["bytes"]):
                 self.s.update_file_remote(existing["url"], role, desired, "ok")
                 return True
+            if self.file_sink.exists(previous, existing["bytes"]):
+                # 새 경로가 충돌하거나 이동에 실패해도 기존 자료를 재다운로드하지 않는다.
+                return True
+            if self.file_sink.exists(desired):
+                self.s.log("archive_layout", existing["url"][:120], False,
+                           f"대상 경로에 다른 파일이 있습니다: {desired}")
+                return True
         relative = desired if role == "resource" else (previous or desired)
         if not self.file_sink.exists(relative, existing["bytes"]):
             return False

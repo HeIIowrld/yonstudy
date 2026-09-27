@@ -11,6 +11,9 @@ from .filename_normalization import nfc
 
 
 MAX_FILENAME_BYTES = 150
+MATERIAL_DIR = "강의자료"
+MEDIA_DIR = "강의미디어"
+SUMMARY_DIR = "강의요약"
 
 
 def _clean(value: str | None, fallback: str = "이름없음") -> str:
@@ -82,6 +85,16 @@ def video_filename(*, week: int, lesson: int, title: str, cmid: int) -> str:
     budget = MAX_FILENAME_BYTES - len((head + tail).encode("utf-8"))
     middle = _truncate_utf8(_clean(title), budget) or "제목 없음"
     return f"{head}{middle}{tail}"
+
+
+def material_path(filename: str) -> Path:
+    """주차 폴더를 만들지 않는 자료 보관 경로."""
+    return Path(MATERIAL_DIR) / filename
+
+
+def media_path(filename: str) -> Path:
+    """영상·녹음과 같은 이름의 자막을 함께 두는 경로."""
+    return Path(MEDIA_DIR) / filename
 
 
 def resource_filename(
@@ -195,7 +208,7 @@ def build_flat_plan(store, *, destination: str | Path, year: str, semester: str)
                 FlatEntry(
                     course_id=course["course_id"], cmid=row["cmid"] or 0,
                     kind=kind, week=week, lesson=lesson,
-                    relative_path=str((base / name).relative_to(destination)),
+                    relative_path=str((base / (material_path(name) if row["role"] == "resource" else name)).relative_to(destination)),
                     source_ready=bool(blob and blob.is_file()), bytes=row["bytes"],
                 )
             )

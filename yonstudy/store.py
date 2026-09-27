@@ -87,6 +87,36 @@ CREATE TABLE IF NOT EXISTS assignment_preference (
     updated_at TEXT NOT NULL
 );
 
+-- 과제 명세로부터 생성한 선택적 요약. 사이트 원문과 분리해 보관한다.
+CREATE TABLE IF NOT EXISTS assignment_summary (
+    cmid INTEGER PRIMARY KEY,
+    source_hash TEXT NOT NULL,
+    one_line TEXT NOT NULL,
+    deliverables_json TEXT NOT NULL,
+    requirements_json TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    generated_at TEXT NOT NULL
+);
+
+-- 외부 아카이브의 강좌 전사본에서 생성한 내용 요약.
+CREATE TABLE IF NOT EXISTS course_summary (
+    course_id INTEGER PRIMARY KEY,
+    source_hash TEXT NOT NULL,
+    overview TEXT NOT NULL,
+    topics_json TEXT NOT NULL,
+    lectures_json TEXT NOT NULL,
+    sources_json TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    generated_at TEXT NOT NULL,
+    weeks_json TEXT,
+    weeks_source_hash TEXT,
+    week_model TEXT,
+    week_prompt_version INTEGER,
+    weeks_generated_at TEXT
+);
+
 -- 첨부/제출/자료 파일. content는 blobs/ 아래에 sha256으로 저장.
 CREATE TABLE IF NOT EXISTS file (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -30,6 +30,8 @@ JOBS: dict[str, tuple[list[str], bool]] = {
     "watch": (["scheduled-watch", "--limit", "1"], False),
     "daily": (["automate", "--no-mail"], False),
     "report": (["report", "--sync-if-stale", "--refresh-assignments", "--email-if-configured"], True),
+    "summaries": (["summarize-assignments"], True),
+    "course-summaries": (["summarize-courses", "--limit", "2"], False),
     "deadline-reminder": (["deadline-reminder"], True),
 }
 
@@ -91,6 +93,13 @@ def main() -> int:
 
     env = job_environment()
     args, wait_for_lock = JOBS[job]
+    if job in {"summaries", "course-summaries"}:
+        args = [*args, *sys.argv[2:]]
+    if job == "course-summaries" and not (
+        env.get("GEMINI_API_KEY") or
+        (Path(env.get("YONSTUDY_STORE", "/data/store")) / "gemini-api-key").is_file()
+    ):
+        return 0
     command = ["/usr/bin/flock", "-E", "0"]
     if not wait_for_lock:
         command.append("-n")
