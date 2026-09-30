@@ -69,6 +69,21 @@ class ArchiveLayoutTests(unittest.TestCase):
             self.assertEqual(result["moved"], 0)
             self.assertEqual(sink.files, files)
 
+    def test_withdrawn_course_files_are_included_in_layout_plan(self):
+        class Sink:
+            def _load_term(self, term):
+                return {self_file: 10, self_generated: 10}
+
+        self_file = self.base + "lecture.pdf"
+        self_generated = self.base + "W01-00__주차학습_자동생성.md"
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course({"course_id": 1, **self.course, "enrolled": 0})
+            result = organize_remote_archive(
+                store, Sink(), year="2026", semester="2학기",
+            )
+            self.assertEqual(result["planned"], {"material": 1})
+
     def test_apply_updates_db_and_backs_up_generated_markdown(self):
         class Sink:
             def __init__(self, files):

@@ -111,6 +111,53 @@ class RcloneRemoteTests(unittest.TestCase):
             self.assertIn("2026-2/TST_테스트/강좌정보.md", remote.files)
             self.assertIn("lecture.pdf", remote.files["2026-2/TST_테스트/강의요약/W99-00__주차미확인_자동생성.md"].decode())
 
+    def test_sync_adopts_material_moved_by_another_worker(self):
+        class MemoryRemote:
+            remote = "nas:backup"
+
+            def __init__(self, target):
+                self.files = {target: b"lecture"}
+
+            def file_path(self, **values):
+                return f"2026-2/{values['course_slug']}/강의자료/lecture.pdf"
+
+            def exists(self, relative, size=None):
+                body = self.files.get(relative)
+                return body is not None and (size is None or len(body) == size)
+
+            def move(self, *_args, **_kwargs):
+                return False
+
+            def upload_file(self, *_args, **_kwargs):
+                raise AssertionError("existing material was uploaded again")
+
+            def upload_bytes(self, relative, body, force=False):
+                self.files[relative] = body
+                return True
+
+            def _load_term(self, term):
+                return {path: len(body) for path, body in self.files.items() if path.startswith(term + "/")}
+
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course({
+                "course_id": 1, "year": "2026", "semester": "2학기",
+                "name": "테스트", "title": "테스트", "slug": "TST_테스트",
+            })
+            store.save_activity({"cmid": 10, "course_id": 1, "modname": "ubfile", "title": "강의안"})
+            old = "2026-2/TST_테스트/lecture.pdf"
+            target = "2026-2/TST_테스트/강의자료/lecture.pdf"
+            store.save_file({
+                "course_id": 1, "cmid": 10, "role": "resource",
+                "name": "lecture.pdf", "url": "https://example.test/lecture",
+                "bytes": 7, "remote_path": old,
+            })
+            store.commit()
+            remote = MemoryRemote(target)
+            result = sync_remote_tree(store, remote, year="2026", semester="2학기")
+            self.assertEqual(result.conflict_files, 0)
+            self.assertEqual(store.file_record("https://example.test/lecture", "resource")["remote_path"], target)
+
     def test_assignment_body_and_metadata_are_archived_without_attachment(self):
         class MemoryRemote:
             remote = "nas:backup"

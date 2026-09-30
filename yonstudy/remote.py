@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -212,6 +213,23 @@ class RcloneRemote:
         listing[target] = moved_size
         return True
 
+    def delete_file(self, relative: str) -> bool:
+        """목록에서 확인된 원격 파일 하나를 지운다."""
+        relative = str(PurePosixPath(relative))
+        listing = self._load_term(relative.split("/", 1)[0])
+        if relative not in listing:
+            return False
+        proc = subprocess.run(
+            [self.exe, "deletefile", self._target(relative)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if proc.returncode != 0:
+            raise RemoteStorageError(
+                (proc.stderr or proc.stdout).strip() or f"원격 파일 삭제 실패: {relative}"
+            )
+        del listing[relative]
+        return True
+
     def move_media(self, source: str, target: str, *, size: int | None = None) -> bool:
         """완성 자막이 있는 영상과 그 SRT/VTT를 새 파일명으로 함께 옮긴다."""
         source = str(PurePosixPath(source))
@@ -310,6 +328,34 @@ class RcloneRemote:
         ))
 
 
+_OLD_LECTURE_DETAIL = re.compile(
+    r"^(?:\d{2}주차|99_주차미확인)__10_.+__[0-9a-f]{10}_요약\.(?:md|html)$"
+)
+_OLD_WEEK_PAGE = re.compile(r"^W\d{2}-00__주차(?:학습|미확인)_자동생성\.(?:md|html)$")
+
+
+def prune_stale_lecture_pages(sink, course: dict, expected: set[str]) -> int:
+    """재생성한 문서에서 사라진 옛 강의·주차 페이지만 정리한다."""
+    if not hasattr(sink, "_load_term") or not hasattr(sink, "delete_file"):
+        return 0
+    base = str(course_archive_root(course))
+    prefix = base + "/"
+    listing = sink._load_term(term_folder(course["year"], course["semester"]))
+    stale = []
+    for path in listing:
+        if not path.startswith(prefix) or path in expected:
+            continue
+        relative = path[len(prefix):]
+        parts = PurePosixPath(relative).parts
+        if len(parts) == 1 and parts[0].endswith(".html") and _OLD_WEEK_PAGE.fullmatch(parts[0]):
+            stale.append(path)
+        elif len(parts) == 2 and parts[0] == "강의요약" and (
+            _OLD_WEEK_PAGE.fullmatch(parts[1]) or _OLD_LECTURE_DETAIL.fullmatch(parts[1])
+        ):
+            stale.append(path)
+    return sum(bool(sink.delete_file(path)) for path in stale)
+
+
 def sync_generated_pages(store, sink: RcloneRemote, *, year: str, semester: str) -> dict:
     """미디어·원본 자료에는 손대지 않고 생성된 학습 문서만 업로드한다."""
     counts = {"course_indexes": 0, "course_summaries": 0,
@@ -346,7 +392,8 @@ def sync_generated_pages(store, sink: RcloneRemote, *, year: str, semester: str)
             sink.upload_bytes(course_summary_path(course), render_course_summary(course, content_summary, inventory=inventory), force=True)
             counts["course_summaries"] += 1
         from .lecture_pages import generated_lecture_documents
-        for relative, body in generated_lecture_documents(course, content_summary, inventory=inventory).items():
+        lecture_documents = generated_lecture_documents(course, content_summary, inventory=inventory)
+        for relative, body in lecture_documents.items():
             sink.upload_bytes(relative, body, force=True)
             if "/강의요약/" in relative and relative.endswith("_요약.md"):
                 counts["lecture_summaries"] += 1
@@ -354,6 +401,7 @@ def sync_generated_pages(store, sink: RcloneRemote, *, year: str, semester: str)
                 counts["week_summaries"] += 1
             else:
                 counts["lecture_indexes"] += 1
+        prune_stale_lecture_pages(sink, course, set(lecture_documents))
         assignments = [dict(row) for row in store.query(
             "SELECT s.*,a.url,a.section_idx,a.section_name,"
             "summary.source_hash AS summary_source_hash,summary.one_line,"
@@ -437,6 +485,7 @@ def sync_study_maps(
                 sink.upload_bytes(course_summary_path(course), render_course_summary(course, summary, inventory=inventory), force=True)
             for relative, body in documents.items():
                 sink.upload_bytes(relative, body, force=True)
+            prune_stale_lecture_pages(sink, course, set(documents))
     return result
 
 
@@ -451,13 +500,15 @@ def organize_remote_archive(
     term = term_folder(year, semester)
     listing = sink._load_term(term)
     courses = [dict(row) for row in store.query(
-        "SELECT course_id,year,semester,name,title,slug FROM course "
-        "WHERE year=? AND semester=? AND enrolled=1 ORDER BY name",
+        "SELECT course_id,year,semester,name,title,slug,enrolled FROM course "
+        "WHERE year=? AND semester=? ORDER BY name",
         (year, semester),
     )]
-    planned = [move for course in courses for move in plan_course_moves(
-        course, listing, include_media=include_media,
-    )]
+    planned = [
+        move for course in courses
+        for move in plan_course_moves(course, listing, include_media=include_media)
+        if course["enrolled"] or move.kind != "generated-backup"
+    ]
     conflicts = move_conflicts(planned, listing)
     result = {
         "term": term, "courses": len(courses), "planned": dict(Counter(move.kind for move in planned)),
@@ -600,6 +651,11 @@ def sync_remote_tree(
                 if sink.exists(previous, row["bytes"]):
                     result.skipped_files += 1
                     continue
+                # 다른 작업자에서 이미 평면 보관함으로 옮긴 경우 DB 경로만 맞춘다.
+                if sink.exists(desired, row["bytes"]):
+                    store.update_file_remote(row["url"], role, desired, "ok")
+                    result.skipped_files += 1
+                    continue
                 if sink.exists(desired):
                     result.conflict_files += 1
                     store.log("archive_layout", str(row["id"]), False, f"대상 경로에 다른 크기의 파일이 있습니다: {desired}")
@@ -726,12 +782,14 @@ def sync_remote_tree(
                 result.uploaded_bytes += len(summary_body)
             else:
                 result.skipped_files += 1
-        for relative, body in generated_lecture_documents(course, content_summary, inventory=inventory).items():
+        lecture_documents = generated_lecture_documents(course, content_summary, inventory=inventory)
+        for relative, body in lecture_documents.items():
             if sink.upload_bytes(relative, body, force=True):
                 result.uploaded_files += 1
                 result.uploaded_bytes += len(body)
             else:
                 result.skipped_files += 1
+        prune_stale_lecture_pages(sink, course, set(lecture_documents))
 
     if term_index_entries:
         body = render_assignments_index(term_index_entries, title=f"{year} {semester} · 과제 읽기")

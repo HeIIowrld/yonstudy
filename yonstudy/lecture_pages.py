@@ -149,7 +149,7 @@ def _asset_kind(path: str) -> str | None:
         return "전사본"
     if suffix in _MATERIAL:
         return "강의자료"
-    if suffix == ".md" and (len(parts) == 1 or parts[0] in {"md", "강의자료", "자료"}):
+    if suffix == ".md" and (len(parts) == 1 or parts[0] in {"md", "강의자료", "자료", "학습노트"}):
         return "학습노트"
     return None
 

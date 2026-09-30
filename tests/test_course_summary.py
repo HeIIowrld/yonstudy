@@ -7,7 +7,7 @@ from unittest.mock import patch
 from yonstudy.course_summary import plain_transcript, render_course_summary, summarize_courses
 from yonstudy.export import export_tree
 from yonstudy.lecture_pages import generated_lecture_documents, week_for_asset, week_for_source
-from yonstudy.remote import sync_generated_pages, sync_study_maps
+from yonstudy.remote import prune_stale_lecture_pages, sync_generated_pages, sync_study_maps
 from yonstudy.store import Store
 
 
@@ -165,6 +165,35 @@ class CourseSummaryTests(unittest.TestCase):
         self.assertEqual(week_for_asset("강의자료/02주차/02-01 재귀.pdf"), 2)
         self.assertEqual(week_for_asset("강의자료/13-03 - Course Wrap-Up.pdf"), 13)
         self.assertEqual(week_for_asset("md/13-03 - Course Wrap-Up.md"), 0)
+
+    def test_user_notes_in_note_shelf_remain_in_week_index(self):
+        from urllib.parse import unquote
+
+        docs = generated_lecture_documents(
+            self.course, None, inventory=["학습노트/week02.md"],
+        )
+        week2 = docs["2026-2/CAS2103_자료구조/강의요약/W02-00__주차학습_자동생성.md"].decode()
+        self.assertIn("../학습노트/week02.md", unquote(week2))
+
+    def test_only_obsolete_generated_lecture_pages_are_pruned(self):
+        class Sink:
+            def __init__(self, files):
+                self.files = dict(files)
+
+            def _load_term(self, _term):
+                return self.files
+
+            def delete_file(self, path):
+                return self.files.pop(path, None) is not None
+
+        base = "2026-2/CAS2103_자료구조/"
+        old = base + "강의요약/01주차__10_옛강의__0123456789_요약.md"
+        manual = base + "강의요약/개인_요약.md"
+        source = base + "강의미디어/01주차.mp4"
+        current = base + "W01-00__주차학습_자동생성.html"
+        sink = Sink({old: 1, manual: 1, source: 1, current: 1})
+        self.assertEqual(prune_stale_lecture_pages(sink, self.course, {current}), 1)
+        self.assertEqual(set(sink.files), {manual, source, current})
 
     def test_generated_upload_touches_only_documents(self):
         class Sink:
