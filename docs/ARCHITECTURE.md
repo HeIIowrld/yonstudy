@@ -94,6 +94,11 @@ assignment_preference (cmid PK, requirement, reason, updated_at)
              -- 개인 제출 필요 여부: not_required. 행이 없으면 사이트 상태로 판단.
              -- 수집기가 갱신하는 submission/completion과 분리해 재수집에도 유지한다.
 
+assignment_deadline (cmid PK, due_at, late_until, source_kind, source_ref,
+                     source_url, evidence, updated_at)
+             -- submission.due_at이 비어 있을 때 과제 본문·공지·일정표에서 찾은
+             -- 보조 기한과 근거. 리포트에서는 원격의 명시적 due_at을 우선한다.
+
 assignment_summary (cmid PK, source_hash, one_line, deliverables_json,
                     requirements_json, model, prompt_version, generated_at)
              -- 선택적 Gemini 요약. 원문 해시가 달라지면 렌더링에서 숨기고 재생성한다.

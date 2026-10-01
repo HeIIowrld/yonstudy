@@ -64,6 +64,7 @@ class GradescopeAssignmentTests(unittest.TestCase):
         )
 
         self.assertEqual(assignment.provider, "Gradescope")
+        self.assertIs(assignment.submitted, False)
         self.assertEqual(assignment.question_count, 2)
         self.assertEqual(assignment.total_points, "80")
         self.assertIn("## 문항 1. Fibonacci Number (509) — 5점", assignment.instructions)
@@ -108,6 +109,7 @@ class GradescopeAssignmentTests(unittest.TestCase):
         }, component="AssignmentSubmissionViewer")
         assignment = parse_gradescope_assignment(page, "https://www.gradescope.com/")
         self.assertEqual(assignment.title, "Arrays")
+        self.assertIs(assignment.submitted, True)
         self.assertEqual(assignment.total_points, "10")
         self.assertIn("문항 1. Reverse Linked List", assignment.instructions)
         self.assertIn("문항 2. Rotate Array", assignment.instructions)
@@ -304,6 +306,25 @@ class LtiLaunchTests(unittest.TestCase):
 
 
 class LtiArchiveIntegrationTests(unittest.TestCase):
+    def test_lti_submission_screen_state_is_saved_without_answers(self):
+        for submitted, expected_status, expected_value in (
+            (False, "미제출", 0),
+            (True, "제출 완료", 1),
+        ):
+            with self.subTest(submitted=submitted), tempfile.TemporaryDirectory() as root:
+                store = Store(root)
+                assignment = LtiAssignment(
+                    "Gradescope", "Task", "https://gradescope.com/",
+                    "Prompt", "<p>Prompt</p>", 1, "5", submitted=submitted,
+                )
+                with patch("yonstudy.archive.fetch_lti_assignment", return_value=assignment):
+                    Archiver(object(), store, verbose=False)._sync_lti_assignment(
+                        SimpleNamespace(course_id=1), SimpleNamespace(cmid=10, title="Task")
+                    )
+                row = store.query("SELECT status,submitted FROM submission WHERE cmid=10")[0]
+                self.assertEqual(row["status"], expected_status)
+                self.assertEqual(row["submitted"], expected_value)
+
     def test_lti_spec_is_saved_as_generic_assignment_without_private_payload(self):
         assignment = LtiAssignment(
             provider="Gradescope",

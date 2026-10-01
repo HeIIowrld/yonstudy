@@ -114,7 +114,7 @@ def _format_datetime_ko(value: str | None, *, include_year: bool = False) -> str
     if not value:
         return ""
     match = re.search(
-        r"(20\d{2})\D(\d{1,2})\D(\d{1,2})(?:\D+(\d{1,2}):(\d{2}))?",
+        r"(20\d{2})\D+(\d{1,2})\D+(\d{1,2})(?:\D+(\d{1,2}):(\d{2}))?",
         value,
     )
     if not match:
@@ -369,14 +369,17 @@ def build_daily_report(
         store,
         f"""
         SELECT DISTINCT a.cmid,c.name AS course_name,a.modname,a.title,a.url,
-               a.open_from,a.open_to,a.late_until,a.completion,
+               a.open_from,a.open_to,COALESCE(a.late_until,d.late_until) AS late_until,a.completion,
                v.progress_pct,v.duration_sec,v.watched_sec,v.max_rate,
-               v.can_log_progress,s.submitted,s.due_at,
+               v.can_log_progress,s.submitted,COALESCE(s.due_at,d.due_at) AS due_at,
+               d.due_at AS inferred_due_at,d.late_until AS inferred_late_until,
+               d.source_url AS deadline_source_url,
                p.requirement AS submission_requirement,p.reason AS submission_reason
           FROM activity a
           JOIN course c ON c.course_id=a.course_id
           LEFT JOIN vod v ON v.cmid=a.cmid
           LEFT JOIN submission s ON s.cmid=a.cmid
+          LEFT JOIN assignment_deadline d ON d.cmid=a.cmid
           LEFT JOIN assignment_preference p ON p.cmid=a.cmid
          WHERE {course_sql} AND a.present=1 AND a.restricted=0
            AND COALESCE(p.requirement,'auto')<>'not_required'
@@ -395,13 +398,14 @@ def build_daily_report(
                     )
                 )
                 OR (
-                    s.submitted=0 AND s.due_at IS NOT NULL AND trim(s.due_at)<>''
+                    s.submitted=0 AND COALESCE(s.due_at,d.due_at) IS NOT NULL
+                    AND trim(COALESCE(s.due_at,d.due_at))<>''
                 )
            )
            AND (
                 a.open_from IS NULL OR substr(a.open_from,1,10)<=?
            )
-         ORDER BY COALESCE(a.late_until,a.open_to,s.due_at,'9999'),c.name,a.cmid
+         ORDER BY COALESCE(a.late_until,d.late_until,a.open_to,s.due_at,d.due_at,'9999'),c.name,a.cmid
         """,
         course_args + (horizon_s, day_s, day_s),
     )
@@ -410,7 +414,7 @@ def build_daily_report(
     for row in todo_candidates:
         opens = _date_in(row.get("open_from"))
         deadline = _date_in(row.get("due_at") or row.get("open_to"))
-        final_deadline = _date_in(row.get("late_until")) or deadline
+        final_deadline = _date_in(row.get("late_until") or row.get("inferred_late_until")) or deadline
         if opens and opens > horizon:
             continue
         # 아직 공개되지 않은 항목은 학기 전체 목록에서 "공개 예정"으로만 보여 준다.
@@ -468,8 +472,12 @@ def build_daily_report(
         SELECT s.cmid,c.course_id,c.name AS course_name,
                COALESCE(a.modname,s.modname) AS modname,
                COALESCE(a.title,s.title) AS title,s.title AS summary_title,
-               a.url,a.section_idx,a.section_name,a.open_from,a.open_to,a.late_until,
-               a.completion,s.submitted,s.status,s.grading_status,s.due_at,
+               a.url,a.section_idx,a.section_name,a.open_from,a.open_to,
+               COALESCE(a.late_until,d.late_until) AS late_until,
+               a.completion,s.submitted,s.status,s.grading_status,
+               COALESCE(s.due_at,d.due_at) AS due_at,
+               d.due_at AS inferred_due_at,d.source_kind AS deadline_source_kind,
+               d.source_url AS deadline_source_url,d.evidence AS deadline_evidence,
                s.last_modified,s.grade,s.seen_at,s.instructions,
                summary.source_hash AS summary_source_hash,summary.one_line,
                p.requirement AS submission_requirement,p.reason AS submission_reason
@@ -477,9 +485,10 @@ def build_daily_report(
           JOIN course c ON c.course_id=s.course_id
           LEFT JOIN activity a ON a.cmid=s.cmid
           LEFT JOIN assignment_summary summary ON summary.cmid=s.cmid
+          LEFT JOIN assignment_deadline d ON d.cmid=s.cmid
           LEFT JOIN assignment_preference p ON p.cmid=s.cmid
          WHERE {course_sql} AND a.present=1 AND COALESCE(a.restricted,0)=0
-         ORDER BY c.name,COALESCE(s.due_at,a.open_to,'9999'),
+         ORDER BY c.name,COALESCE(s.due_at,d.due_at,a.open_to,'9999'),
                   COALESCE(a.section_idx,0),s.cmid
         """,
         course_args,
@@ -821,11 +830,39 @@ def _assignment_term_status(row: dict, target: date) -> str:
 
 
 def _remaining_assignments(report: DailyReport) -> list[dict]:
-    return [
+    rows = [
         row for row in report.semester_assignments
         if is_submission_required(row) and row.get("submitted") == 0
         and _assignment_term_status(row, report.target) != "공개 예정"
     ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            (_date_in(row.get("due_at") or row.get("open_to")) or date.max).isoformat(),
+            row.get("course_name") or "", row.get("title") or "",
+        ),
+    )
+
+
+def _unknown_deadline_assignments(report: DailyReport) -> list[dict]:
+    """제출 여부는 알 수 없지만 마감 근거가 있는 외부 과제를 반환한다."""
+    rows = [
+        row for row in report.semester_assignments
+        if is_submission_required(row) and row.get("submitted") is None
+        and (row.get("due_at") or row.get("open_to"))
+        and _assignment_term_status(row, report.target) != "공개 예정"
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            (_date_in(row.get("due_at") or row.get("open_to")) or date.max).isoformat(),
+            row.get("course_name") or "", row.get("title") or "",
+        ),
+    )
+
+
+def _deadline_origin_label(row: dict) -> str:
+    return " · 공지/본문에서 확인" if row.get("inferred_due_at") else ""
 
 
 def assignments_due_today(report: DailyReport) -> list[dict]:
@@ -923,6 +960,7 @@ def render_email_text(report: DailyReport) -> str:
     videos, submissions, others = _email_completion_groups(report)
     video_progress = _video_progress_by_course(report)
     remaining_assignments = _remaining_assignments(report)
+    unknown_deadline_assignments = _unknown_deadline_assignments(report)
     upcoming_releases = _upcoming_releases(report)
     unknown_assignments = sum(
         _assignment_term_status(row, report.target) == "제출 상태 미확인"
@@ -968,6 +1006,31 @@ def render_email_text(report: DailyReport) -> str:
         lines.append("- 확인된 오늘 마감 과제 없음")
     lines.append("22시에 제출 상태를 다시 확인해 오늘 마감 미제출 과제가 있으면 추가 알림을 보냅니다.")
 
+    lines += ["", f"미제출 과제 전체 ({len(remaining_assignments)}개)"]
+    for row in remaining_assignments:
+        lines.append(
+            f"- 과제 · {row['course_name']} · {row['title']}"
+            + f" · {_assignment_term_status(row, report.target)}"
+            + (f" · {_deadline_summary(row)}"
+               if row.get("due_at") or row.get("open_to") else " · 마감 시간 미표시")
+            + _deadline_origin_label(row)
+            + (f"\n  {row['one_line']}" if row.get("one_line") else "")
+            + (f"\n  {row['url']}" if row.get("url") else "")
+        )
+    if not remaining_assignments:
+        lines.append("- 확인된 미제출 과제 없음")
+
+    if unknown_deadline_assignments:
+        lines += ["", f"제출 상태 확인 필요 ({len(unknown_deadline_assignments)}개)"]
+        for row in unknown_deadline_assignments:
+            lines.append(
+                f"- {row['course_name']} · {row['title']} · {_deadline_summary(row)}"
+                + _deadline_origin_label(row)
+                + (f"\n  과제: {row['url']}" if row.get("url") else "")
+                + (f"\n  기한 근거: {row['deadline_source_url']}"
+                   if row.get("deadline_source_url") else "")
+            )
+
     if video_progress:
         lines += ["", "과목별 동영상 수강률"]
         lines += [
@@ -988,15 +1051,8 @@ def render_email_text(report: DailyReport) -> str:
             for row in upcoming_releases
         ]
 
-    if report.today_schedule or remaining_assignments or report.viewing_queue:
-        lines += ["", "현재 남은 항목"]
-        for row in remaining_assignments:
-            lines.append(
-                f"- 과제 · {row['course_name']} · {row['title']}"
-                + (f" · {_deadline_summary(row)}"
-                   if row.get("due_at") or row.get("open_to") else "")
-                + (f"\n  {row['one_line']}" if row.get("one_line") else "")
-            )
+    if report.today_schedule or report.viewing_queue:
+        lines += ["", "현재 남은 항목 (영상·오늘 일정)"]
         todo_by_cmid = {r["cmid"]: r for r in report.todos}
         for row in report.viewing_queue:
             todo = todo_by_cmid.get(row["cmid"], row)
@@ -1008,13 +1064,13 @@ def render_email_text(report: DailyReport) -> str:
                 + (f" · 권장 수강일 {recommended}" if recommended else "")
                 + (f" · {_deadline_summary(todo)}" if todo.get("open_to") else "")
             )
-        assignment_ids = {r["cmid"] for r in remaining_assignments}
+        assignment_ids = {r["cmid"] for r in remaining_assignments + unknown_deadline_assignments}
         viewing_ids = {r["cmid"] for r in report.viewing_queue}
         for row in report.today_schedule:
             if row["cmid"] not in assignment_ids | viewing_ids:
                 lines.append(f"- 일정 · {row['course_name']} · {row['title']}")
     else:
-        lines += ["", "현재 남은 미제출 과제나 수강 가능한 미완료 영상은 없습니다."]
+        lines += ["", "현재 수강 가능한 미완료 영상이나 별도 오늘 일정은 없습니다."]
 
     if videos or submissions or others:
         lines += ["", "오늘 확인된 완료"]
@@ -1048,6 +1104,7 @@ def render_report_html(report: DailyReport) -> str:
     remaining_video_count = sum(r["remaining"] for r in video_progress)
     total_video_count = sum(r["total"] for r in video_progress)
     remaining_assignments = _remaining_assignments(report)
+    unknown_deadline_assignments = _unknown_deadline_assignments(report)
     upcoming_releases = _upcoming_releases(report)
     unknown_assignments = sum(
         _assignment_term_status(row, report.target) == "제출 상태 미확인"
@@ -1124,6 +1181,35 @@ def render_report_html(report: DailyReport) -> str:
         ) or "확인된 오늘 마감 과제 없음",
         "22시에 다시 확인하여 오늘 마감 미제출 과제가 있으면 추가 알림을 보냅니다.",
     ))
+    rows.append(section(
+        f"미제출 과제 전체 ({len(remaining_assignments)}개)",
+        "".join(
+            item(
+                r["title"],
+                f"{r['course_name']} · {_assignment_term_status(r, report.target)}",
+                (_deadline_summary(r) if r.get("due_at") or r.get("open_to")
+                 else "마감 시간 미표시") + _deadline_origin_label(r),
+                r.get("url"),
+                r.get("one_line") or "",
+            ) for r in remaining_assignments
+        ) or '<div style="padding:8px 0;color:#475569;font-size:14px">확인된 미제출 과제가 없습니다.</div>',
+        "현재 학기 전체 기준이며 마감 순서로 표시합니다.",
+    ))
+    if unknown_deadline_assignments:
+        rows.append(section(
+            f"제출 상태 확인 필요 ({len(unknown_deadline_assignments)}개)",
+            "".join(
+                item(
+                    r["title"],
+                    f"{r['course_name']} · 제출 상태 미확인",
+                    _deadline_summary(r) + _deadline_origin_label(r),
+                    r.get("url"),
+                    (f"기한 근거: {r['deadline_source_url']}"
+                     if r.get("deadline_source_url") else ""),
+                ) for r in unknown_deadline_assignments
+            ),
+            "외부 제출 도구는 LearnUs만으로 제출 여부를 단정할 수 없어 직접 확인이 필요합니다.",
+        ))
     if report.stale:
         rows.append(
             '<tr><td style="padding:0 24px 18px"><div style="background:#fff7ed;border:1px solid #fed7aa;'
@@ -1178,9 +1264,6 @@ def render_report_html(report: DailyReport) -> str:
 
     todo_parts: list[str] = []
     todo_by_cmid = {r["cmid"]: r for r in report.todos}
-    for r in remaining_assignments:
-        detail = _deadline_summary(r) if r.get("due_at") or r.get("open_to") else "마감 시간 미표시"
-        todo_parts.append(item(r["title"], f"{r['course_name']} · 미제출 과제", detail, r.get("url"), r.get("one_line") or ""))
     for r in report.viewing_queue:
         todo = todo_by_cmid.get(r["cmid"], r)
         status = _video_term_status(r, report.target)
@@ -1193,7 +1276,10 @@ def render_report_html(report: DailyReport) -> str:
         if todo.get("open_to"):
             detail += f" · {_deadline_summary(todo)}"
         todo_parts.append(item(r["title"], f"{r['course_name']} · {status}", detail, r.get("url")))
-    used_ids = {r["cmid"] for r in remaining_assignments + report.viewing_queue}
+    used_ids = {
+        r["cmid"]
+        for r in remaining_assignments + unknown_deadline_assignments + report.viewing_queue
+    }
     for r in report.today_schedule:
         if r["cmid"] not in used_ids:
             todo_parts.append(item(r["title"], f"{r['course_name']} · {r['schedule_kind']}", url=r.get("url")))
@@ -1212,7 +1298,7 @@ def render_report_html(report: DailyReport) -> str:
         rows.append(
             section(
                 "현재 남은 항목",
-                '<div style="padding:8px 0;color:#475569;font-size:14px">현재 남은 미제출 과제나 수강 가능한 미완료 영상이 없습니다.</div>',
+                '<div style="padding:8px 0;color:#475569;font-size:14px">현재 수강 가능한 미완료 영상이나 별도 오늘 일정은 없습니다.</div>',
                 assignment_note,
             )
         )

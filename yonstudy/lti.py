@@ -40,6 +40,8 @@ class LtiAssignment:
     instructions_html: str
     question_count: int
     total_points: str | None
+    # Gradescope의 답안 내용은 저장하지 않고, 새 제출/제출 보기 화면 구분만 보관한다.
+    submitted: bool | None = None
 
 
 @dataclass
@@ -187,7 +189,13 @@ def _gradescope_props(page: str) -> dict | None:
             return result
 
         # 제출 후 화면에는 답안과 성적도 있다. 문항 ID로 공개 문제 정보만 결합한다.
-        return {"title": assignment.get("title"), "outline": public_outline(outline)}
+        return {
+            "title": assignment.get("title"),
+            "outline": public_outline(outline),
+            "_yonstudy_submitted": True,
+        }
+    props = dict(props)
+    props["_yonstudy_submitted"] = False
     return props
 
 
@@ -521,6 +529,7 @@ def parse_gradescope_assignment(page: str, source_url: str) -> LtiAssignment:
         instructions_html="\n".join(html),
         question_count=len(numbered_questions),
         total_points=total_points,
+        submitted=props.get("_yonstudy_submitted"),
     )
 
 

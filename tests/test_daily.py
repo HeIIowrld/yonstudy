@@ -455,6 +455,40 @@ class DailyReportTests(unittest.TestCase):
         full_body = render_report(report)
         self.assertRegex(full_body, r"\[제출 상태 미확인\] \[테스트과목\].*이전 주차 외부 과제")
 
+    def test_unknown_external_assignment_with_inferred_deadline_is_listed_for_check(self):
+        yesterday = (self.today - timedelta(days=1)).isoformat()
+        due = (self.today + timedelta(days=4)).isoformat()
+        self.store.save_activity({
+            "cmid": 31, "course_id": 1, "modname": "lti",
+            "title": "3. Queues and Stacks Coding Assignment",
+            "url": "https://example.test/lti/31", "completion": None,
+            "open_from": f"{yesterday} 00:00:00", "restricted": 0,
+            "seen_at": f"{yesterday}T10:00:00",
+        })
+        self.store.save_submission({
+            "cmid": 31, "course_id": 1, "modname": "lti",
+            "title": "3. Queues and Stacks Coding Assignment",
+            "submitted": None, "status": "제출 상태 미확인",
+        })
+        self.store.save_assignment_deadline({
+            "cmid": 31, "due_at": f"{due} 23:59",
+            "late_until": None, "source_kind": "post", "source_ref": "42",
+            "source_url": "https://example.test/post/42",
+            "evidence": "The deadline is October 2.",
+        })
+        self.store.commit()
+
+        report = build_daily_report(self.store, target=self.today)
+        row = report.semester_assignments[0]
+        self.assertEqual(row["due_at"], f"{due} 23:59")
+        self.assertEqual(row["inferred_due_at"], f"{due} 23:59")
+        for render in (render_email_text, render_report_html):
+            body = render(report)
+            self.assertIn("제출 상태 확인 필요 (1개)", body)
+            self.assertIn("3. Queues and Stacks Coding Assignment", body)
+            self.assertIn("공지/본문에서 확인", body)
+            self.assertNotIn("현재 미제출 1개", body)
+
     def test_team_submission_exemption_keeps_remote_state_without_pending_counts(self):
         day = self.today.isoformat()
         for cmid, title in ((30, "팀 보고서"), (31, "개인 과제")):

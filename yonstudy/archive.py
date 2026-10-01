@@ -17,6 +17,7 @@ from .leetcode import enrich_with_leetcode
 from .notebook import MAX_NOTEBOOK_BYTES, parse_notebook_spec
 from .oj import OjArchiveError, enrich_with_yonsei_oj
 from .client import LEARNUS, LearnUsClient
+from .deadlines import infer_course_assignment_deadlines
 from .filename_normalization import nfc
 from .store import Store, _now
 
@@ -274,6 +275,7 @@ class Archiver:
                 if (not rows or (rows[0]["seen_at"] or "") < started
                     or not (rows[0]["status"] or rows[0]["submitted"] == 1)):
                     errors.append(activity.cmid)
+            infer_course_assignment_deadlines(self.s, course.course_id)
             self.s.commit()
             if errors:
                 raise RuntimeError(f"제출 상태를 새로 확인하지 못했습니다: {errors}")
@@ -320,6 +322,10 @@ class Archiver:
         # 포럼의 내 글은 강좌 단위 페이지에서 따로 받는다.
         if any(x.modname == "forum" for x in activities):
             self._sync_forum_posts(course, cdir)
+
+        # LTI처럼 LearnUs 자체 마감 열이 없는 과제는 과제 본문과 공지의
+        # deadline/due/제출 기한 문구를 연결해 보조 기한으로 보관한다.
+        infer_course_assignment_deadlines(self.s, course.course_id)
 
         # ubfile, folder, resource에 붙은 자료
         if fetch_files:
@@ -572,6 +578,8 @@ class Archiver:
                 instructions=instructions.strip(), instructions_html=instructions_html.strip(),
                 question_count=int(previous_fields.get("Question count") or 0),
                 total_points=previous_fields.get("Maximum marks"),
+                submitted=(None if previous.get("submitted") is None
+                           else bool(previous.get("submitted"))),
             )
             warnings.append("Gradescope 명세를 다시 열 수 없어 이전 수집본을 사용했습니다.")
 
@@ -632,16 +640,26 @@ class Archiver:
                     fields[key] = previous_fields[key]
         if warnings:
             fields["Collection warnings"] = warnings
+        if assignment.submitted is True:
+            status = "제출 완료"
+            submitted = 1
+        elif assignment.submitted is False:
+            status = "미제출"
+            submitted = 0
+        else:
+            status = "제출 상태 미확인"
+            submitted = None
         self.s.save_submission(
             {
                 "cmid": a.cmid,
                 "course_id": course.course_id,
                 "modname": "lti",
                 "title": a.title or assignment.title,
-                "status": "제출 상태 미확인",
+                "status": status,
                 "fields_json": json.dumps(fields, ensure_ascii=False),
-                # 과제 명세 페이지 열람만으로 제출 여부를 추정하지 않는다.
-                "submitted": None,
+                # 답안은 읽거나 저장하지 않고 Gradescope가 제공한 새 제출 화면과
+                # 제출 보기 화면만 구분한다. 화면을 못 열면 미확인으로 유지한다.
+                "submitted": submitted,
                 "seen_at": _now(),
                 "instructions": assignment.instructions or None,
                 "instructions_html": assignment.instructions_html or None,

@@ -99,6 +99,19 @@ CREATE TABLE IF NOT EXISTS assignment_summary (
     generated_at TEXT NOT NULL
 );
 
+-- LearnUs 제출 화면에 마감이 없을 때 과제 본문·공지에서 찾은 보조 기한.
+-- 원격의 명시적 due_at은 항상 이 값보다 우선하며, 출처를 함께 보관한다.
+CREATE TABLE IF NOT EXISTS assignment_deadline (
+    cmid INTEGER PRIMARY KEY,
+    due_at TEXT NOT NULL,
+    late_until TEXT,
+    source_kind TEXT NOT NULL,
+    source_ref TEXT,
+    source_url TEXT,
+    evidence TEXT,
+    updated_at TEXT NOT NULL
+);
+
 -- 외부 아카이브의 강좌 전사본에서 생성한 내용 요약.
 CREATE TABLE IF NOT EXISTS course_summary (
     course_id INTEGER PRIMARY KEY,
@@ -206,6 +219,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_course ON activity(course_id);
 CREATE INDEX IF NOT EXISTS idx_file_course ON file(course_id);
 CREATE INDEX IF NOT EXISTS idx_vod_course ON vod(course_id);
 CREATE INDEX IF NOT EXISTS idx_sub_course ON submission(course_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_deadline_due ON assignment_deadline(due_at);
 CREATE INDEX IF NOT EXISTS idx_post_course ON post(course_id);
 CREATE INDEX IF NOT EXISTS idx_post_cmid ON post(cmid);
 CREATE INDEX IF NOT EXISTS idx_change_at ON change_event(at);
@@ -620,6 +634,37 @@ class Store:
                 row.get("title"), "0", "1", {"modname": row.get("modname")},
             )
         self._upsert("submission", "cmid", row)
+
+    def save_assignment_deadline(self, row: dict) -> None:
+        """본문·공지에서 추론한 과제 기한과 근거를 저장한다."""
+        row = dict(row)
+        row.setdefault("updated_at", _now())
+        old = self.db.execute(
+            "SELECT due_at,late_until,source_url FROM assignment_deadline WHERE cmid=?",
+            (row["cmid"],),
+        ).fetchone()
+        changed = old is None or any(
+            old[key] != row.get(key) for key in ("due_at", "late_until", "source_url")
+        )
+        self._upsert("assignment_deadline", "cmid", row)
+        if changed:
+            assignment = self.db.execute(
+                "SELECT course_id,title FROM submission WHERE cmid=?", (row["cmid"],)
+            ).fetchone()
+            self.record_change(
+                "assignment_deadline_inferred",
+                assignment["course_id"] if assignment else None,
+                row["cmid"],
+                assignment["title"] if assignment else None,
+                old["due_at"] if old else None,
+                row["due_at"],
+                {
+                    "late_until": row.get("late_until"),
+                    "source_kind": row.get("source_kind"),
+                    "source_ref": row.get("source_ref"),
+                    "source_url": row.get("source_url"),
+                },
+            )
 
     def set_assignment_requirement(
         self, cmid: int, requirement: str, reason: str = "",
