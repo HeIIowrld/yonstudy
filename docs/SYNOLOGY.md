@@ -19,9 +19,18 @@ The production layout keeps mutable data and secrets outside the image:
 └── 10.학기/                human-readable course archive
 ```
 
-The human-readable archive is mounted separately at `/archive`. The configured
-`archive:` rclone alias writes there without sending files through SMB back to
-the same NAS.
+The human-readable archive is mounted separately at `/archive`. The default
+`archive:` rclone alias writes directly to this mount. When Synology Cloud Sync
+mirrors the archive to OneDrive, configure the alias through the NAS SMB share
+so Cloud Sync receives file-change notifications from the host. Container writes
+to the local mount can remain unnoticed until Cloud Sync rescans the folder.
+
+For example, a private rclone config can contain an SMB backend named `nas` and
+an `archive` alias with `remote = nas:home/02_Personal/01_학교/10.학기`. Set
+`YONSTUDY_RCLONE_CONFIG_FILE` in the deployment `.env` to that config's absolute
+host path. Keep the credential file outside folders mirrored to the cloud, with
+mode 0600; Compose mounts it read-only at `/config/rclone.conf`. Omitting this
+variable uses `config/rclone.conf` as before.
 
 ## Initial deployment
 
