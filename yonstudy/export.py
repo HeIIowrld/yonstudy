@@ -15,7 +15,7 @@ from urllib.parse import quote
 from .assignment_state import is_submission_required, submission_requirement_label
 from .assignment_summary import current_summary
 from .daily import SEOUL
-from .filename_normalization import nfc
+from .filename_normalization import MAX_FILENAME_BYTES, nfc, safe_filename
 from .markdown_view import markdown_to_html, safe_url
 
 
@@ -31,8 +31,8 @@ def term_folder(year: str, semester: str) -> str:
     return f"{year}-{TERM_CODES.get(semester, semester)}"
 
 
-def _safe(value: str | None, fallback: str = "이름없음", limit: int = 180) -> str:
-    value = nfc(re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value or "")).strip(" .")
+def _safe(value: str | None, fallback: str = "이름없음", limit: int = MAX_FILENAME_BYTES) -> str:
+    value = nfc(re.sub(r"[\\/:*?\"<>|\x00-\x1f\x7f-\x9f]", "_", value or "")).strip(" .")
     value = value or fallback
     return value.encode("utf-8")[:limit].decode("utf-8", "ignore").rstrip(" .") or fallback
 
@@ -140,7 +140,7 @@ def assignment_with_local_files(store, course: dict, assignment: dict, exists, *
         category = "제출물" if row["role"] == "submission" else "과제자료"
         name = row["name"] or f"파일_{assignment['cmid']}"
         default = str(base / category / _safe(assignment.get("title"), f"과제_{assignment['cmid']}")
-                      / _safe(f"{row['id']}_{name}"))
+                      / safe_filename(f"{row['id']}_{name}"))
         candidates = [row["remote_path"], default] if remote else [default]
         for path in candidates:
             if (path and path.startswith(str(base) + "/")
@@ -562,15 +562,15 @@ def export_tree(
             elif row["role"] == "post":
                 result.board_attachments += 1
                 board = _safe(row["activity_title"], f"게시판_{row['cmid']}")
-                rel = Path("게시판_첨부") / board / _safe(f"{row['id']}_{base_name}")
+                rel = Path("게시판_첨부") / board / safe_filename(f"{row['id']}_{base_name}")
             elif row["role"] == "subtitle":
                 result.subtitle_files += 1
-                rel = Path("자막") / _safe(f"{row['id']}_{base_name}")
+                rel = Path("자막") / safe_filename(f"{row['id']}_{base_name}")
             else:
                 result.assignment_files += 1
                 category = "제출물" if row["role"] == "submission" else "과제자료"
                 activity = _safe(row["activity_title"], f"과제_{row['cmid']}")
-                rel = Path(category) / activity / _safe(f"{row['id']}_{base_name}")
+                rel = Path(category) / activity / safe_filename(f"{row['id']}_{base_name}")
             source = store.blob_path(row["sha256"]) if row["sha256"] else None
             if source is None or not source.is_file():
                 result.missing_blobs += 1
@@ -602,7 +602,7 @@ def export_tree(
             filename = _safe(
                 f"{day}_{post['post_id']}_{post['subject']}",
                 f"글_{post['post_id']}",
-                140,
+                MAX_FILENAME_BYTES - len(".md"),
             ) + ".md"
             target = course_dir / "QNA_공지" / board / filename
             body = "\n".join(

@@ -32,6 +32,12 @@ host path. Keep the credential file outside folders mirrored to the cloud, with
 mode 0600; Compose mounts it read-only at `/config/rclone.conf`. Omitting this
 variable uses `config/rclone.conf` as before.
 
+Archive filenames use a 128-byte UTF-8 budget, including the extension, to avoid
+Cloud Sync's OneDrive for Business filename limit. Generated names preserve the
+file/activity ID and extension when shortening the title. Existing decomposed
+Korean names can be converted with `normalize-names`; apply path changes to the
+scheduler's SQLite records as well when files have a saved `remote_path`.
+
 ## Initial deployment
 
 Install Synology Container Manager and place a clean checkout in `source/`.

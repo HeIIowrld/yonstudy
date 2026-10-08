@@ -3,11 +3,55 @@ import unicodedata
 import unittest
 from pathlib import Path
 
-from yonstudy.filename_normalization import nfc, normalize_tree
+from yonstudy.filename_normalization import nfc, normalize_tree, safe_filename
 from yonstudy.store import Store
+from yonstudy.remote import RcloneRemote
 
 
 class FilenameNormalizationTests(unittest.TestCase):
+    def test_attachment_filename_keeps_id_and_extension_within_cloud_sync_limit(self):
+        name = safe_filename("123_" + unicodedata.normalize("NFD", "강의안") * 50 + ".docx")
+
+        self.assertTrue(name.startswith("123_"))
+        self.assertTrue(name.endswith(".docx"))
+        self.assertLessEqual(len(name.encode("utf-8")), 128)
+        self.assertEqual(name, unicodedata.normalize("NFC", name))
+
+    def test_filename_recovers_utf8_mojibake_and_preserves_latin_names(self):
+        corrupted = "협동학습2.pdf".encode("utf-8").decode("latin1")
+
+        self.assertEqual(safe_filename("42_" + corrupted), "42_협동학습2.pdf")
+        self.assertEqual(safe_filename("42_café.pdf"), "42_café.pdf")
+
+    def test_filename_removes_controls_that_block_cloud_uploads(self):
+        self.assertEqual(safe_filename("42_bad\x85name.pdf"), "42_bad_name.pdf")
+
+    def test_remote_names_keep_extensions_and_ids_for_every_attachment_role(self):
+        sink = object.__new__(RcloneRemote)
+        for role in ("resource", "post", "submission", "introattachment", "subtitle"):
+            with self.subTest(role=role):
+                path = sink.file_path(
+                    year="2026", semester="2학기", course_slug="테스트",
+                    activity_title="강의", file_id=42, name="강의안" * 80 + ".docx",
+                    role=role, section_idx=1,
+                )
+                name = Path(path).name
+                self.assertLessEqual(len(name.encode("utf-8")), 128)
+                self.assertTrue(name.endswith(".docx"))
+                self.assertIn("42", name)
+
+    def test_remote_post_filename_fits_cloud_sync_ascii_boundary(self):
+        sink = object.__new__(RcloneRemote)
+        path = sink.post_path(
+            year="2026", semester="2학기", course_slug="테스트",
+            board_title="공지", post_id="123456", subject="A" * 200,
+            written_at="2026-10-08",
+        )
+        name = Path(path).name
+        self.assertLessEqual(len(name.encode("utf-8")), 128)
+        self.assertTrue(name.startswith("20261008_123456_"))
+        self.assertTrue(name.endswith(".md"))
+
     def test_nfc_combines_mac_style_korean_jamo(self):
         decomposed = unicodedata.normalize("NFD", "강의자료.pdf")
 

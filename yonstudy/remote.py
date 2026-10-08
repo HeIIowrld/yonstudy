@@ -37,6 +37,7 @@ from .flat_layout import (
     video_filename,
     week_number,
 )
+from .filename_normalization import MAX_FILENAME_BYTES, safe_filename
 
 
 class RemoteStorageError(RuntimeError):
@@ -284,7 +285,7 @@ class RcloneRemote:
     ) -> str:
         term = _safe(term_folder(year, semester))
         course = _safe(course_slug)
-        filename = _safe(f"{file_id}_{name}")
+        filename = safe_filename(f"{file_id}_{name}")
         if role == "resource":
             filename = resource_filename(
                 section_idx=section_idx, section_name=section_name,
@@ -322,7 +323,7 @@ class RcloneRemote:
         board_title: str, post_id: str, subject: str, written_at: str | None,
     ) -> str:
         day = "".join(c for c in (written_at or "")[:10] if c.isdigit()) or "날짜없음"
-        filename = _safe(f"{day}_{post_id}_{subject}", f"글_{post_id}", 140) + ".md"
+        filename = _safe(f"{day}_{post_id}_{subject}", f"글_{post_id}", MAX_FILENAME_BYTES - len(".md")) + ".md"
         return str(PurePosixPath(
             _safe(term_folder(year, semester)), _safe(course_slug),
             "QNA_공지", _safe(board_title), filename,

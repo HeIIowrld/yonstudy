@@ -3,9 +3,29 @@
 from __future__ import annotations
 
 import os
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+
+MAX_FILENAME_BYTES = 128
+
+
+def safe_filename(value: str, fallback: str = "파일") -> str:
+    """Cloud Sync가 허용하는 UTF-8 길이 안에서 확장자를 보존한다."""
+    if any("\x80" <= character <= "\x9f" for character in value):
+        try:
+            value = value.encode("latin1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    value = nfc(re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f-\x9f]', "_", value)).strip(" .") or fallback
+    suffix = Path(value).suffix
+    if len(suffix.encode("utf-8")) > 16:
+        suffix = ""
+    stem = value[:-len(suffix)] if suffix else value
+    budget = MAX_FILENAME_BYTES - len(suffix.encode("utf-8"))
+    stem = stem.encode("utf-8")[:budget].decode("utf-8", "ignore").rstrip(" .") or fallback
+    return stem + suffix
 
 
 def nfc(value: str) -> str:

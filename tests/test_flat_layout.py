@@ -43,6 +43,7 @@ class FlatLayoutTests(unittest.TestCase):
         self.assertTrue(name.startswith("W01-L02__강의영상__"))
         self.assertTrue(name.endswith("__cmid4529931.mp4"))
         self.assertLessEqual(len(name.encode("utf-8")), MAX_FILENAME_BYTES)
+        self.assertLessEqual(len(name.encode("utf-8")), 128)
 
     def test_video_filename_is_readable_and_keeps_stable_id(self):
         self.assertEqual(
