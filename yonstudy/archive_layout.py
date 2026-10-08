@@ -45,7 +45,7 @@ def plan_course_moves(course: dict, inventory: dict[str, int], *, include_media:
             continue
         relative = full[len(prefix):]
         parts = PurePosixPath(relative).parts
-        if not parts or any(part.startswith(".") for part in parts):
+        if not parts or any(part.startswith((".", "@")) or part == "#recycle" for part in parts):
             continue
         suffix = PurePosixPath(relative).suffix.casefold()
         destination = None

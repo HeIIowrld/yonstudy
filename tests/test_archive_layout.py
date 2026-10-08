@@ -48,6 +48,18 @@ class ArchiveLayoutTests(unittest.TestCase):
         moves = plan_course_moves(self.course, inventory)
         self.assertEqual(len(move_conflicts(moves, inventory)), 1)
 
+    def test_synology_metadata_is_never_moved_as_course_material(self):
+        inventory = {self.base + path: 10 for path in (
+            "강의자료/@eaDir/slides.pdf@SynoEAStream",
+            "강의자료/02주차/@eaDir/slides.pdf@SynoEAStream",
+            "강의자료/02주차/@metadata.pdf",
+            "@eaDir/slides.pdf",
+            "#recycle/slides.pdf",
+            "강의자료/02주차/slides.pdf",
+        )}
+        moves = plan_course_moves(self.course, inventory, include_media=True)
+        self.assertEqual([move.source for move in moves], [self.base + "강의자료/02주차/slides.pdf"])
+
     def test_apply_aborts_entire_term_if_a_target_conflicts(self):
         class Sink:
             def __init__(self, files): self.files = files
