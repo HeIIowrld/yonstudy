@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html as html_mod
 import json
+import posixpath
 import re
 import shutil
 from dataclasses import asdict, dataclass
@@ -122,6 +123,50 @@ def assignment_spec_path(course: dict, assignment: dict, extension: str = ".md")
         extension=extension,
     )
     return str(course_archive_root(course) / "과제자료" / _safe(title) / filename)
+
+
+def assignment_with_local_files(store, course: dict, assignment: dict, exists, *, remote: bool = False) -> dict:
+    """실제로 보관된 첨부만 과제 문서 기준 상대 링크로 연결한다."""
+    base = course_archive_root(course)
+    parent = PurePosixPath(assignment_spec_path(course, assignment)).parent
+    links = {}
+    for row in store.query(
+        "SELECT id,role,name,url,bytes,remote_path FROM file "
+        "WHERE course_id=? AND cmid=? AND role IN ('introattachment','submission')",
+        (course["course_id"], assignment["cmid"]),
+    ):
+        if not row["url"]:
+            continue
+        category = "제출물" if row["role"] == "submission" else "과제자료"
+        name = row["name"] or f"파일_{assignment['cmid']}"
+        default = str(base / category / _safe(assignment.get("title"), f"과제_{assignment['cmid']}")
+                      / _safe(f"{row['id']}_{name}"))
+        candidates = [row["remote_path"], default] if remote else [default]
+        for path in candidates:
+            if (path and path.startswith(str(base) + "/")
+                    and ".." not in PurePosixPath(path).parts and exists(path, row["bytes"])):
+                links[row["url"]] = quote(posixpath.relpath(path, str(parent)), safe="/-._~")
+                break
+    return {**assignment, "archived_file_links": links}
+
+
+def _local_assignment_html(instructions: str, assignment: dict) -> str:
+    links = assignment.get("archived_file_links") or {}
+
+    def replace(match):
+        head, delimiter, url = match.groups()
+        target = links.get(html_mod.unescape(url))
+        return (head + delimiter + html_mod.escape(target, quote=True) + delimiter
+                if target else match.group())
+
+    return re.sub(r"(\b(?:href|src)\s*=\s*)(['\"])(.*?)\2", replace, instructions, flags=re.I)
+
+
+def _local_assignment_markdown(instructions: str, assignment: dict) -> str:
+    for url, target in (assignment.get("archived_file_links") or {}).items():
+        instructions = instructions.replace("](" + url + ")", "](" + target + ")")
+        instructions = instructions.replace("](<" + url + ">)", "](" + target + ")")
+    return _local_assignment_html(instructions, assignment)
 
 
 def _submission_fields(assignment: dict) -> dict:
@@ -267,7 +312,9 @@ def render_assignment_markdown(course: dict, assignment: dict) -> bytes:
                 metadata.extend([f"### {label}", "", *(f"- {item}" for item in items), ""])
     metadata.extend([
         "## 과제 명세", "",
-        assignment.get("instructions") or "(본문이 없거나 수집하지 못했습니다.)", "",
+        _local_assignment_markdown(
+            assignment.get("instructions") or "(본문이 없거나 수집하지 못했습니다.)", assignment
+        ), "",
     ])
     body = "\n".join(metadata)
     return body.encode("utf-8")
@@ -298,6 +345,7 @@ def render_assignment_html(course: dict, assignment: dict) -> bytes:
         lambda match: markdown_to_html(html_mod.unescape(match.group(1)), assignment.get("url") or ""),
         instructions, flags=re.DOTALL,
     )
+    instructions = _local_assignment_html(instructions, assignment)
     contents = []
 
     def section_link(match):
@@ -594,7 +642,11 @@ def export_tree(
             """,
             (course["course_id"],),
         )]
-        assignments = [current_summary(assignment) for assignment in assignments]
+        assignments = [assignment_with_local_files(
+            store, course, current_summary(assignment),
+            lambda path, size: (root / path).is_file() and
+            (size is None or (root / path).stat().st_size == size),
+        ) for assignment in assignments]
         result.assignment_specs += len(assignments)
         summary_body = render_assignment_summaries(course, assignments)
         if summary_body:

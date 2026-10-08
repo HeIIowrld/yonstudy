@@ -10,7 +10,7 @@ import cli
 from yonstudy.archive import Archiver
 from yonstudy.html_content import find_elements
 from yonstudy.onedrive import RcloneOneDrive
-from yonstudy.remote import RemoteStorageError, RcloneRemote, sync_remote_tree
+from yonstudy.remote import RemoteStorageError, RcloneRemote, sync_generated_pages, sync_remote_tree
 from yonstudy.store import Store
 
 
@@ -236,6 +236,52 @@ class RcloneRemoteTests(unittest.TestCase):
             self.assertIn(course_index, remote.forced)
             self.assertIn("본인 제출 불필요", remote.files[term_index].decode())
             self.assertIn("과제 읽기 목록", remote.files["2026-2/AIC2120_인공지능개론/강좌정보.md"].decode())
+
+    def test_assignment_links_use_existing_nas_attachment_in_both_sync_modes(self):
+        class MemoryRemote:
+            remote = "nas:backup"
+            file_path = RcloneRemote.file_path
+
+            def __init__(self, path):
+                self.files = {path: b"document"}
+
+            def exists(self, path, size=None):
+                body = self.files.get(path)
+                return body is not None and (size is None or len(body) == size)
+
+            def upload_bytes(self, path, body, force=False):
+                self.files[path] = body
+                return True
+
+            def _load_term(self, term):
+                return {path: len(body) for path, body in self.files.items() if path.startswith(term + "/")}
+
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            store.save_course({"course_id": 1, "year": "2026", "semester": "2학기", "name": "테스트", "slug": "TST"})
+            source = "https://ys.learnus.org/pluginfile.php/1/introattachment/HW2.docx"
+            missing = "https://ys.learnus.org/pluginfile.php/1/introattachment/missing.pdf"
+            path = "2026-2/TST/과제자료/old folder/HW2 #original.docx"
+            store.save_activity({"cmid": 10, "course_id": 1, "modname": "assign", "title": "HW2"})
+            store.save_submission({
+                "cmid": 10, "course_id": 1, "modname": "assign", "title": "HW2",
+                "instructions": f"[HW2]({source})\n\n[Missing]({missing})",
+            })
+            for url, name, saved in [(source, "HW2.docx", path), (missing, "missing.pdf", None)]:
+                store.save_file({
+                    "course_id": 1, "cmid": 10, "role": "introattachment", "name": name,
+                    "url": url, "bytes": 8, "remote_path": saved, "remote_status": "ok",
+                })
+            store.commit()
+            for sync in (sync_remote_tree, sync_generated_pages):
+                with self.subTest(sync=sync.__name__):
+                    remote = MemoryRemote(path)
+                    sync(store, remote, year="2026", semester="2학기")
+                    doc = next(body.decode() for p, body in remote.files.items() if p.endswith(".html") and "과제명세" in p)
+                    self.assertIn('href="../old%20folder/HW2%20%23original.docx"', doc)
+                    self.assertIn(missing, doc)
+                    md = next(body.decode() for p, body in remote.files.items() if p.endswith(".md") and "과제명세" in p)
+                    self.assertIn("[HW2](../old%20folder/HW2%20%23original.docx)", md)
 
     def test_withdrawn_course_is_skipped_but_classmate_attachment_is_kept(self):
         class MemoryRemote:

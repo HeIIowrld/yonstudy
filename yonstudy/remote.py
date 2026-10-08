@@ -17,6 +17,7 @@ from .export import (
     assignment_index_entries,
     assignment_summary_path,
     assignment_spec_path,
+    assignment_with_local_files,
     course_archive_root,
     course_index_path,
     course_summary_path,
@@ -413,7 +414,9 @@ def sync_generated_pages(store, sink: RcloneRemote, *, year: str, semester: str)
             "WHERE s.course_id=? AND a.present=1 ORDER BY a.section_idx,s.cmid",
             (course["course_id"],),
         )]
-        assignments = [current_summary(row) for row in assignments]
+        assignments = [assignment_with_local_files(
+            store, course, current_summary(row), sink.exists, remote=True,
+        ) for row in assignments]
         summary_body = render_assignment_summaries(course, assignments)
         if summary_body:
             sink.upload_bytes(assignment_summary_path(course), summary_body, force=True)
@@ -731,7 +734,9 @@ def sync_remote_tree(
             """,
             (course["course_id"],),
         )]
-        assignments = [current_summary(assignment) for assignment in assignments]
+        assignments = [assignment_with_local_files(
+            store, course, current_summary(assignment), sink.exists, remote=True,
+        ) for assignment in assignments]
         result.assignment_specs += len(assignments)
         summary_body = render_assignment_summaries(course, assignments)
         if summary_body:

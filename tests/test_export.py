@@ -188,6 +188,38 @@ class OneDriveExportTests(unittest.TestCase):
         self.assertIn("@media print", rendered)
         self.assertNotIn('<pre class="notebook-markdown">', rendered)
 
+    def test_assignment_attachment_links_open_exported_files_without_learnus_login(self):
+        source = "https://ys.learnus.org/pluginfile.php/1/introattachment/HW2.docx?forcedownload=1&x=2"
+        missing = "https://ys.learnus.org/pluginfile.php/1/introattachment/missing.pdf"
+        instructions = f"[HW2]({source})\n\n[Missing]({missing})"
+        self.store.save_activity({
+            "cmid": 12, "course_id": 1, "modname": "assign", "title": "HW2",
+            "url": "https://ys.learnus.org/mod/assign/view.php?id=12",
+        })
+        self.store.save_submission({
+            "cmid": 12, "course_id": 1, "modname": "assign", "title": "HW2",
+            "instructions": instructions,
+            "instructions_html": f'<a href="{html.escape(source)}">HW2</a><img src="{html.escape(source)}"><a href="{missing}">Missing</a>',
+        })
+        digest, size = self.store.put_blob(b"archived document")
+        for url, name, sha in [(source, "과제 #2.docx", digest), (missing, "missing.pdf", None)]:
+            self.store.save_file({
+                "course_id": 1, "cmid": 12, "role": "introattachment",
+                "name": name, "url": url, "sha256": sha, "bytes": size,
+            })
+        self.store.commit()
+        export_onedrive_tree(self.store, self.out.name, year="2026", semester="2학기")
+        page = next(Path(self.out.name).rglob("*과제명세*.html"))
+        doc = page.read_text()
+        attachment = next(link for link in find_elements(doc, lambda tag, attrs: tag == "a") if link.text() == "HW2")
+        target = page.parent / unquote(attachment.attrs["href"])
+        self.assertEqual(target.read_bytes(), b"archived document")
+        self.assertIn("%23", attachment.attrs["href"])
+        self.assertEqual(find_elements(doc, lambda tag, attrs: tag == "img")[0].attrs["src"], attachment.attrs["href"])
+        self.assertIn(missing, doc)
+        self.assertIn("](" + attachment.attrs["href"] + ")", page.with_suffix(".md").read_text())
+        self.assertEqual(self.store.query("SELECT instructions FROM submission WHERE cmid=12")[0]["instructions"], instructions)
+
     def test_reading_index_escapes_titles_and_filename_delimiters(self):
         rendered = render_assignments_index([{
             "title": '<img src=x onerror="bad">', "html_path": "Team #1/task?.html",
