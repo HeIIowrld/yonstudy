@@ -33,6 +33,7 @@ JOBS: dict[str, tuple[list[str], bool]] = {
     "summaries": (["summarize-assignments"], True),
     "course-summaries": (["summarize-courses", "--limit", "2"], False),
     "deadline-reminder": (["deadline-reminder"], True),
+    "assignment-mail": (["process-assignment-mail"], False),
 }
 
 
@@ -103,7 +104,8 @@ def main() -> int:
     command = ["/usr/bin/flock", "-E", "0"]
     if not wait_for_lock:
         command.append("-n")
-    command += [LOCK, "/usr/local/bin/python", "/app/cli.py", *args]
+    lock = "/run/yonstudy/assignment-mail.lock" if job == "assignment-mail" else LOCK
+    command += [lock, "/usr/local/bin/python", "/app/cli.py", *args]
 
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("a", encoding="utf-8") as output:

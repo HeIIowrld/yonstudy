@@ -285,6 +285,18 @@ def cmd_assignment_status(args) -> int:
     return 0
 
 
+def cmd_process_assignment_mail(args) -> int:
+    from yonstudy.assignment_mail import process_assignment_mail
+
+    try:
+        result = process_assignment_mail(Store(args.store), dry_run=args.dry_run)
+    except Exception as exc:
+        print(f"과제 알림 설정 메일 확인 실패: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def cmd_summarize_assignments(args) -> int:
     """수집된 과제 본문에서 변경된 요약만 생성한다."""
     from yonstudy.assignment_summary import DEFAULT_MODEL, api_key_for_store, summarize_assignments
@@ -642,9 +654,12 @@ def cmd_report(args) -> int:
             print(f"메일 설정 미완료 — 09:00 발송 보류: {recipient}")
             return 0
         subject = f"[yonstudy] {target.month}월 {target.day}일 런어스 요약"
+        from yonstudy.assignment_mail import prepare_assignment_actions
+
+        actions = prepare_assignment_actions(store, report.semester_assignments, recipient=recipient)
         send_report(
-            render_email_text(report),
-            html_body=render_report_html(report),
+            render_email_text(report, assignment_actions=actions),
+            html_body=render_report_html(report, assignment_actions=actions),
             to=recipient,
             subject=subject,
         )
@@ -1322,6 +1337,10 @@ def main() -> int:
     reminder.add_argument("--dry-run", action="store_true",
                           help="실시간 조회와 DB 갱신만 수행하고 메일은 보내지 않음")
     reminder.set_defaults(fn=cmd_deadline_reminder)
+
+    mail_actions = sub.add_parser("process-assignment-mail", help="메일로 받은 과제 알림 제외·복원 요청 반영")
+    mail_actions.add_argument("--dry-run", action="store_true", help="요청을 확인하고 설정은 바꾸지 않음")
+    mail_actions.set_defaults(fn=cmd_process_assignment_mail)
 
     exp = sub.add_parser(
         "export", aliases=["export-onedrive"],

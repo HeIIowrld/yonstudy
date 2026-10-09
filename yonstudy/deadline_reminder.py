@@ -28,7 +28,8 @@ def refresh_assignments(store, client, *, year: str, semester: str) -> list[dict
     return errors
 
 
-def render_reminder(rows: list[dict], *, checked_at: str, errors: list[dict]) -> tuple[str, str]:
+def render_reminder(rows: list[dict], *, checked_at: str, errors: list[dict],
+                    assignment_actions: dict[int, str] | None = None) -> tuple[str, str]:
     lines = [
         f"오늘 마감 미제출 과제 {len(rows)}개",
         f"LearnUs 제출 상태 확인: {checked_at} (한국 시간)",
@@ -44,7 +45,16 @@ def render_reminder(rows: list[dict], *, checked_at: str, errors: list[dict]) ->
     if errors:
         lines.append("일부 과목은 조회에 실패하여 제외했습니다. 이 목록이 전체 미제출 목록은 아닐 수 있습니다.")
     body = "\n".join(lines) + "\n"
-    return body, '<html><body><pre style="white-space:pre-wrap;font-family:sans-serif">' + html.escape(body) + '</pre></body></html>'
+    html_body = '<html><body><pre style="white-space:pre-wrap;font-family:sans-serif">' + html.escape(body) + '</pre>'
+    if assignment_actions:
+        body += "\n과제 알림 설정\n아래 링크로 준비된 메일을 보내면 다음 확인 때 반영됩니다.\n"
+        html_body += "<p>「알림 제외」로 준비된 메일을 보내면 다음 확인 때 반영됩니다.</p>"
+        for row in rows:
+            url = assignment_actions.get(row["cmid"])
+            if url:
+                body += f"- {row['title']} · 알림 제외: {url}\n"
+                html_body += f'<p>{html.escape(row["title"])} · <a href="{html.escape(url, quote=True)}">알림 제외</a></p>'
+    return body, html_body + '</body></html>'
 
 
 def run_deadline_reminder(*, store_path: str, cookie_path: str, dry_run: bool = False) -> tuple[int, dict]:
@@ -109,6 +119,11 @@ def _run_deadline_reminder(*, store_path: str, cookie_path: str, dry_run: bool =
         recipient = os.environ.get("YONSTUDY_REPORT_TO")
         if not recipient:
             return finish(1, "mail_not_configured")
+        from .assignment_mail import prepare_assignment_actions
+
+        actions = prepare_assignment_actions(store, pending, recipient=recipient)
+        body, html_body = render_reminder(pending, checked_at=report.generated_at,
+                                         errors=errors, assignment_actions=actions)
         send_report(body, html_body=html_body, to=recipient,
                     subject=f"[yonstudy] {day.month}월 {day.day}일 22시 알림: 오늘 마감 미제출 {len(pending)}개")
         state["sent_date"] = day.isoformat()

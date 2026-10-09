@@ -955,7 +955,7 @@ def _video_progress_by_course(report: DailyReport) -> list[dict]:
     return result
 
 
-def render_email_text(report: DailyReport) -> str:
+def render_email_text(report: DailyReport, *, assignment_actions: dict[int, str] | None = None) -> str:
     """메일 클라이언트가 HTML을 지원하지 않을 때 보여 줄 간결한 대체 본문."""
     videos, submissions, others = _email_completion_groups(report)
     video_progress = _video_progress_by_course(report)
@@ -1091,11 +1091,19 @@ def render_email_text(report: DailyReport) -> str:
             for r in report.new_files
         ]
 
+    if assignment_actions:
+        from .assignment_mail import action_label
+
+        lines += ["", "과제 알림 설정", "아래 링크로 준비된 메일을 보내면 다음 확인 때 반영됩니다."]
+        for row in report.semester_assignments:
+            if row["cmid"] in assignment_actions:
+                lines += [f"- {row['course_name']} · {row['title']} · {action_label(row)}",
+                          f"  {assignment_actions[row['cmid']]}"]
     lines += ["", f"마지막 확인: {_format_datetime_ko(report.source_updated_at, include_year=True) or '확인 기록 없음'}"]
     return "\n".join(lines) + "\n"
 
 
-def render_report_html(report: DailyReport) -> str:
+def render_report_html(report: DailyReport, *, assignment_actions: dict[int, str] | None = None) -> str:
     """Gmail 등에서 바로 읽기 좋은 단일 열 HTML 브리핑."""
     esc = lambda value: html.escape(str(value or ""), quote=True)
     videos, submissions, others = _email_completion_groups(report)
@@ -1123,12 +1131,15 @@ def render_report_html(report: DailyReport) -> str:
         )
 
     def item(title: str, meta: str, detail: str = "", url: str | None = None,
-             brief: str = "") -> str:
+             brief: str = "", action_url: str | None = None,
+             link_label: str = "LearnUs에서 보기") -> str:
         detail_html = (
             f'<div style="margin-top:6px;color:#64748b;font-size:13px;line-height:1.55">{esc(detail)}</div>'
             if detail else ""
         )
-        link_html = f'<div style="margin-top:8px;font-size:13px">{link(url)}</div>' if url else ""
+        link_html = f'<div style="margin-top:8px;font-size:13px">{link(url, link_label)}</div>' if url else ""
+        if action_url:
+            link_html += f'<div style="margin-top:8px;font-size:13px">{link(action_url, "알림 제외")}</div>'
         brief_html = (
             f'<div style="margin-top:6px;color:#244f82;font-size:13px;line-height:1.55">{esc(brief)}</div>'
             if brief else ""
@@ -1177,6 +1188,7 @@ def render_report_html(report: DailyReport) -> str:
                 f"마감 {r.get('due_at') or r.get('open_to')}",
                 r.get("url"),
                 r.get("one_line") or "",
+                (assignment_actions or {}).get(r["cmid"]),
             ) for r in due_today
         ) or "확인된 오늘 마감 과제 없음",
         "22시에 다시 확인하여 오늘 마감 미제출 과제가 있으면 추가 알림을 보냅니다.",
@@ -1191,6 +1203,7 @@ def render_report_html(report: DailyReport) -> str:
                  else "마감 시간 미표시") + _deadline_origin_label(r),
                 r.get("url"),
                 r.get("one_line") or "",
+                (assignment_actions or {}).get(r["cmid"]),
             ) for r in remaining_assignments
         ) or '<div style="padding:8px 0;color:#475569;font-size:14px">확인된 미제출 과제가 없습니다.</div>',
         "현재 학기 전체 기준이며 마감 순서로 표시합니다.",
@@ -1206,10 +1219,33 @@ def render_report_html(report: DailyReport) -> str:
                     r.get("url"),
                     (f"기한 근거: {r['deadline_source_url']}"
                      if r.get("deadline_source_url") else ""),
+                    (assignment_actions or {}).get(r["cmid"]),
                 ) for r in unknown_deadline_assignments
             ),
             "외부 제출 도구는 LearnUs만으로 제출 여부를 단정할 수 없어 직접 확인이 필요합니다.",
         ))
+    if assignment_actions:
+        excluded = [r for r in report.semester_assignments
+                    if not is_submission_required(r) and r["cmid"] in assignment_actions]
+        settings = (
+            '<div style="color:#475569;font-size:13px;line-height:1.6">'
+            '「알림 제외」를 누르면 메일 작성창이 열립니다. 준비된 내용을 보내면 다음 확인 때 반영됩니다. '
+            '제외된 과제는 아래에서 다시 알림을 켤 수 있습니다.</div>'
+        )
+        settings += "".join(
+            item(r["title"], f"{r['course_name']} · 본인 제출 불필요",
+                 r.get("submission_reason") or "", assignment_actions[r["cmid"]],
+                 link_label="알림 다시 받기")
+            for r in excluded
+        )
+        # 마감이 아직 없는 외부 과제도 메일에서 제외할 수 있게 표시한다.
+        visible = {r["cmid"] for r in due_today + remaining_assignments + unknown_deadline_assignments + excluded}
+        settings += "".join(
+            item(r["title"], r["course_name"], action_url=assignment_actions[r["cmid"]])
+            for r in report.semester_assignments
+            if r["cmid"] in assignment_actions and r["cmid"] not in visible
+        )
+        rows.append(section("과제 알림 설정", settings))
     if report.stale:
         rows.append(
             '<tr><td style="padding:0 24px 18px"><div style="background:#fff7ed;border:1px solid #fed7aa;'

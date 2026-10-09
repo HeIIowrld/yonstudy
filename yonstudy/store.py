@@ -87,6 +87,16 @@ CREATE TABLE IF NOT EXISTS assignment_preference (
     updated_at TEXT NOT NULL
 );
 
+-- 메일에서 보낸 개인 알림 설정 요청. 일회용 코드는 해시만 보관한다.
+CREATE TABLE IF NOT EXISTS assignment_mail_action (
+    token_hash TEXT PRIMARY KEY,
+    cmid INTEGER NOT NULL,
+    requirement TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at TEXT
+);
+
 -- 과제 명세로부터 생성한 선택적 요약. 사이트 원문과 분리해 보관한다.
 CREATE TABLE IF NOT EXISTS assignment_summary (
     cmid INTEGER PRIMARY KEY,

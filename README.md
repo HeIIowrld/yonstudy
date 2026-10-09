@@ -361,6 +361,41 @@ python cli.py assignment-status 4566742 --auto       # 다시 사이트 상태�
 sudo docker exec yonstudy python /app/cli.py --store /data/store assignment-status 4566742 --not-required --reason "팀 대표자가 제출"
 ```
 
+### 메일에서 과제 알림 설정하기
+
+`YONSTUDY_MAIL_ACTIONS=1`을 설정하면 아침 요약과 마감 알림의 과제 옆에
+**알림 제외** 링크가 생긴다. 링크를 누르면 메일 작성창이 열리고, 준비된 내용을
+그대로 보내면 개인 제출 불필요로 지정한다. 제외한 과제는 아침 메일의
+**과제 알림 설정**에서 **알림 다시 받기**로 복원한다. 새로 등록된 과제는 각각
+설정해야 하며, 이미 받은 메일은 이후 설정 변경으로 바뀌지 않는다.
+
+Docker 예약 작업은 설정 요청을 3분마다 확인한다. Gmail은 기존 SMTP 계정과
+앱 비밀번호를 사용한다. 다른 메일 서비스는 `YONSTUDY_IMAP_HOST`,
+`YONSTUDY_IMAP_USER`, `YONSTUDY_IMAP_PASSWORD`도 지정한다. 기본값은
+SSL 포트 993과 `INBOX`다. 서버가 보는 메일함에 요청 메일이 도착해야 한다.
+메일의 링크가 열리지 않으면 메일 앱의 `mailto` 연결 설정을 확인한다.
+
+설정 요청 제목만 검색하고 본문은 읽음 표시 없이 조회한다. 메일을 삭제하거나
+응답 메일을 보내지 않는다. 수신자 본인이 보낸 요청과 일회용 코드가 일치해야
+적용되며, 링크는 발급 후 90일 동안 유효하다. 처리 상태는
+`store/assignment_mail_state.json`에 기록한다.
+
+```bash
+python cli.py process-assignment-mail --dry-run  # 요청 확인, 설정 변경 없음
+python cli.py process-assignment-mail           # 요청 반영
+```
+
+### 수강 철회한 과목
+
+LearnUs 전체 수강 목록에서 사라진 과목은 다음 정상 동기화 때 비수강으로 전환한다.
+과제·영상 알림, 오늘 할 일, 자동 재생에서 제외하고 이전에 모은 자료는 보관한다.
+다시 수강 목록에 나타나면 수강 상태도 복원한다. 사이트 오류로 목록을 읽지 못하거나
+기존 강좌가 있는데 목록 전체가 비어 있으면 철회로 판단하지 않는다.
+
+철회 후에도 LearnUs 수강 목록에 남아 있는 과목은 계속 수강 중으로 인식한다.
+`YONSTUDY_EXTRA_COURSE_IDS`로 고정 등록한 과목도 자동 제외하지 않으므로 철회한
+과목의 ID가 이 설정에 있다면 함께 제거한다.
+
 ```bash
 python cli.py report                         # 저장된 DB로 출력
 python cli.py report --sync                  # 먼저 현재 학기를 가볍게 갱신

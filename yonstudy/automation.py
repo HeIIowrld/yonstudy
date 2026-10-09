@@ -204,9 +204,12 @@ def run_daily_automation(
         state["mail"] = {"status": "dry_run", "to": recipient}
     elif smtp_ready:
         try:
+            from .assignment_mail import prepare_assignment_actions
+
+            actions = prepare_assignment_actions(store, report.semester_assignments, recipient=recipient)
             send_report(
-                render_email_text(report),
-                html_body=render_report_html(report),
+                render_email_text(report, assignment_actions=actions),
+                html_body=render_report_html(report, assignment_actions=actions),
                 to=recipient,
                 subject=f"[yonstudy] {target.month}월 {target.day}일 런어스 요약",
             )
