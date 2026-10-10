@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS post (
     no TEXT, subject TEXT, writer TEXT, written_at TEXT, hits TEXT,
     replies INTEGER, url TEXT, body TEXT, fetched_at TEXT,
     checked_at TEXT,
+    updated_at TEXT,
     UNIQUE(cmid, modname, post_id)
 );
 
@@ -601,9 +602,15 @@ class Store:
         row.setdefault("fetched_at", now)
         row.setdefault("checked_at", now)
         old = self.db.execute(
-            "SELECT fetched_at FROM post WHERE cmid=? AND modname=? AND post_id=?",
+            "SELECT fetched_at,updated_at,subject,body FROM post WHERE cmid=? AND modname=? AND post_id=?",
             (row.get("cmid"), row.get("modname"), row.get("post_id")),
         ).fetchone()
+        if old is None:
+            row["updated_at"] = row["fetched_at"]
+        elif any(key in row and row[key] != old[key] for key in ("subject", "body")):
+            row["updated_at"] = now
+        else:
+            row["updated_at"] = old["updated_at"] or old["fetched_at"]
         # forum의 t123 행은 토론 수집 완료를 나타내는 내부 마커다.
         synthetic_forum_marker = (
             row.get("modname") == "forum"

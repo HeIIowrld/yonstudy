@@ -20,6 +20,7 @@ from .client import LEARNUS, LearnUsClient
 from .deadlines import infer_course_assignment_deadlines
 from .filename_normalization import nfc
 from .store import Store, _now
+from .exam_notices import is_exam_subject
 
 MAX_INLINE_FILE = int(os.environ.get("YONSTUDY_MAX_FILE_MB", "512")) * 1024 * 1024
 POST_REFRESH_AFTER = timedelta(days=7)
@@ -697,6 +698,7 @@ class Archiver:
             total += len(listing)
 
             for post in listing:
+                exam_post = is_exam_subject(post.subject)
                 existing = self.s.post_record(a.cmid, "ubboard", post.post_id)
                 known_post = existing is not None
                 listing_changed = bool(
@@ -712,8 +714,9 @@ class Archiver:
                     or listing_changed
                     or retry_attachments
                     or (
-                        page_no == 1
-                        and _refresh_due(existing["checked_at"] or existing["fetched_at"])
+                        (page_no == 1 or exam_post)
+                        and _refresh_due(existing["checked_at"] or existing["fetched_at"],
+                                         after=timedelta(hours=6) if exam_post else POST_REFRESH_AFTER)
                     )
                 )
                 if not needs_refresh:

@@ -9,7 +9,7 @@ import os
 import re
 import smtplib
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from .assignment_state import is_submission_required, submission_requirement_label
 from .assignment_summary import current_summary
+from .exam_notices import collect_exam_notices, exam_notice_label
 from .progress import progress_verified
 
 
@@ -82,6 +83,7 @@ class DailyReport:
     semester_assignments: list[dict]
     completion_by_course: list[dict]
     untracked: list[dict]
+    exam_notices: list[dict] = field(default_factory=list)
 
 
 def _board_category(board_name: str | None, subject: str | None = None) -> str:
@@ -312,15 +314,16 @@ def build_daily_report(
         f"""
         SELECT p.fetched_at AS at,p.cmid,p.post_id,p.subject AS title,
                p.written_at,p.writer,p.body,c.name AS course_name,
-               a.title AS board_name,p.modname,p.url
+               a.title AS board_name,p.modname,p.url,p.updated_at
           FROM post p
           JOIN course c ON c.course_id=p.course_id
           LEFT JOIN activity a ON a.cmid=p.cmid
          WHERE {course_sql} AND COALESCE(a.present,1)=1
-           AND (substr(p.fetched_at,1,10)=? OR substr(p.written_at,1,10)=?)
+           AND (substr(p.fetched_at,1,10)=? OR substr(p.written_at,1,10)=?
+                OR substr(p.updated_at,1,10)=?)
          ORDER BY p.written_at,p.id
         """,
-        course_args + (day_s, day_s),
+        course_args + (day_s, day_s, day_s),
     )
     unique_posts = []
     seen_posts = set()
@@ -331,6 +334,8 @@ def build_daily_report(
         seen_posts.add(key)
         row["category"] = _board_category(row.get("board_name"), row.get("title"))
         row["excerpt"] = _excerpt(row.get("body"))
+        row["content_updated"] = bool(row.get("updated_at") and row["updated_at"][:10] == day_s
+                                      and row["updated_at"] != row.get("at"))
         unique_posts.append(row)
     new_posts = unique_posts
 
@@ -578,6 +583,7 @@ def build_daily_report(
         semester_assignments=semester_assignments,
         completion_by_course=completion_by_course,
         untracked=untracked,
+        exam_notices=collect_exam_notices(store, target=target, year=year, semester=semester),
     )
 
 
@@ -639,6 +645,7 @@ def render_report(report: DailyReport) -> str:
             "  백그라운드 동기화가 완료되면 다음 리포트에 자동 반영됩니다.",
         ]
 
+    lines += _exam_notice_text_lines(report)
     lines += ["", f"오늘 공개된 항목 ({len(report.opened)})"]
     lines += [
         f"- [{r['course_name']}] {r['title']} · {_status(r)} · {r['open_from']}"
@@ -955,6 +962,27 @@ def _video_progress_by_course(report: DailyReport) -> list[dict]:
     return result
 
 
+def _exam_notice_text_lines(report: DailyReport) -> list[str]:
+    if not report.exam_notices:
+        return []
+    lines = ["", f"시험 일정·공지 ({len(report.exam_notices)}개)",
+             "공지 원문에서 확인한 일정입니다. 예정된 시험은 시험일까지 표시합니다."]
+    for row in report.exam_notices:
+        lines.append(f"- {row['course_name']} · {row['exam_kind']} · {row['title']}")
+        lines.append(f"  {exam_notice_label(row)}")
+        if row.get("excerpt"):
+            lines.append(f"  {row['excerpt']}")
+        if row.get("url"):
+            lines.append(f"  {row['url']}")
+    return lines
+
+
+def _ordinary_new_posts(report: DailyReport) -> list[dict]:
+    exam_keys = {(r["cmid"], r["modname"], r["post_id"]) for r in report.exam_notices}
+    return [r for r in report.new_posts
+            if (r["cmid"], r["modname"], r["post_id"]) not in exam_keys]
+
+
 def render_email_text(report: DailyReport, *, assignment_actions: dict[int, str] | None = None) -> str:
     """메일 클라이언트가 HTML을 지원하지 않을 때 보여 줄 간결한 대체 본문."""
     videos, submissions, others = _email_completion_groups(report)
@@ -993,6 +1021,7 @@ def render_email_text(report: DailyReport, *, assignment_actions: dict[int, str]
     if report.stale:
         lines += ["", "주의: 오늘 자료를 아직 모두 확인하지 못해 내용이 달라질 수 있습니다."]
 
+    lines += _exam_notice_text_lines(report)
     due_today = assignments_due_today(report)
     lines += ["", f"오늘 마감 과제 ({len(due_today)}개)"]
     for row in due_today:
@@ -1078,11 +1107,15 @@ def render_email_text(report: DailyReport, *, assignment_actions: dict[int, str]
         lines += [f"- 과제 제출 · {r['course_name']} · {r['title']}" for r in submissions]
         lines += [f"- 자료 확인 · {r['course_name']} · {r['title']}" for r in others]
 
-    if report.new_posts:
+    new_posts = _ordinary_new_posts(report)
+    if new_posts:
         lines += ["", "새 공지·Q&A"]
         lines += [
-            f"- {r['course_name']} · {r['category']} · {r['title']}\n  {r.get('url') or ''}"
-            for r in report.new_posts
+            f"- {r['course_name']} · {r['category']} · {r['title']}"
+            + (" · 본문 수정 감지" if r.get("content_updated") else "")
+            + (f"\n  {r['excerpt']}" if r.get("excerpt") else "")
+            + (f"\n  {r['url']}" if r.get("url") else "")
+            for r in new_posts
         ]
     if report.new_files:
         lines += ["", "새 강의 자료 및 첨부 파일"]
@@ -1178,6 +1211,15 @@ def render_report_html(report: DailyReport, *, assignment_actions: dict[int, str
     )
 
     rows: list[str] = []
+    if report.exam_notices:
+        rows.append(section(
+            f"시험 일정·공지 ({len(report.exam_notices)}개)",
+            "".join(item(
+                r["title"], f"{r['course_name']} · {r['exam_kind']}",
+                exam_notice_label(r), r.get("url"), r.get("excerpt") or "",
+            ) for r in report.exam_notices),
+            "공지 원문에서 확인한 일정입니다. 예정된 시험은 시험일까지 표시합니다.",
+        ))
     due_today = assignments_due_today(report)
     rows.append(section(
         f"오늘 마감 과제 ({len(due_today)}개)",
@@ -1348,11 +1390,12 @@ def render_report_html(report: DailyReport, *, assignment_actions: dict[int, str
     post_parts = [
         item(
             r["title"],
-            f"{r['course_name']} · {r['category']} · {r.get('board_name') or '게시판'}",
+            f"{r['course_name']} · {r['category']} · {r.get('board_name') or '게시판'}"
+            + (" · 본문 수정 감지" if r.get("content_updated") else ""),
             r.get("excerpt") or "",
             r.get("url"),
         )
-        for r in report.new_posts
+        for r in _ordinary_new_posts(report)
     ]
     if post_parts:
         rows.append(section("새 공지·Q&A", "".join(post_parts)))
