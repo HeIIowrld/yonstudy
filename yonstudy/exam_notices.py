@@ -28,7 +28,13 @@ _OTHER_DATE = re.compile(r"과제|제출|범위|페이지|작성일|등록일|�
 
 
 def is_exam_subject(subject: str | None) -> bool:
-    return bool(EXAM_SUBJECT.search(subject or ""))
+    text = subject or ""
+    if not EXAM_SUBJECT.search(text):
+        return False
+    # 'Midterm Project'처럼 중간 평가용 제출물을 시험일로 분류하지 않는다.
+    if re.search(r"과제|보고서|프로젝트|발표|\b(?:assignments?|homeworks?|projects?|reports?|presentations?)\b", text, re.I):
+        return bool(re.search(r"시험|고사|\bexams?\b", text, re.I))
+    return True
 
 
 def _kind(match) -> str:

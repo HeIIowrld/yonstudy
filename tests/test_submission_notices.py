@@ -140,6 +140,12 @@ class SubmissionNoticeTests(unittest.TestCase):
         self.assertIn("오늘 일정", submission_notice_label(row))
         self.assertNotIn("오늘 마감", submission_notice_label(row))
 
+    def test_midterm_project_is_a_submission_notice_rather_than_an_exam(self):
+        self.notice(title="Midterm Project Report", body="Submission deadline: October 26 at 6PM")
+        report = self.report()
+        self.assertEqual(report.exam_notices, [])
+        self.assertEqual(report.submission_notices[0]["notice_due_at"], "2026-10-26 18:00")
+
     def test_distinct_deadlines_and_relative_dates_require_original_notice(self):
         self.notice(title="프로젝트 보고서 안내", body="초안 마감: 10/14. 최종 보고서 마감: 10/21.")
         row = self.report().submission_notices[0]
