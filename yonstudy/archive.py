@@ -21,6 +21,8 @@ from .deadlines import infer_course_assignment_deadlines
 from .filename_normalization import nfc
 from .store import Store, _now
 from .exam_notices import is_exam_subject
+from .notice_sources import is_notice_board
+from .submission_notices import is_submission_subject
 
 MAX_INLINE_FILE = int(os.environ.get("YONSTUDY_MAX_FILE_MB", "512")) * 1024 * 1024
 POST_REFRESH_AFTER = timedelta(days=7)
@@ -698,7 +700,9 @@ class Archiver:
             total += len(listing)
 
             for post in listing:
-                exam_post = is_exam_subject(post.subject)
+                schedule_post = is_exam_subject(post.subject) or (
+                    is_notice_board(a.title) and is_submission_subject(post.subject)
+                )
                 existing = self.s.post_record(a.cmid, "ubboard", post.post_id)
                 known_post = existing is not None
                 listing_changed = bool(
@@ -714,9 +718,9 @@ class Archiver:
                     or listing_changed
                     or retry_attachments
                     or (
-                        (page_no == 1 or exam_post)
+                        (page_no == 1 or schedule_post)
                         and _refresh_due(existing["checked_at"] or existing["fetched_at"],
-                                         after=timedelta(hours=6) if exam_post else POST_REFRESH_AFTER)
+                                         after=timedelta(hours=6) if schedule_post else POST_REFRESH_AFTER)
                     )
                 )
                 if not needs_refresh:
@@ -762,8 +766,12 @@ class Archiver:
         saved = 0
         for thread_id, _title in threads:
             marker = self.s.post_record(a.cmid, "forum", f"t{thread_id}")
+            schedule_thread = is_notice_board(a.title) and (
+                is_exam_subject(_title) or is_submission_subject(_title)
+            )
             if marker and not _refresh_due(
-                marker["checked_at"] or marker["fetched_at"], FORUM_REFRESH_AFTER
+                marker["checked_at"] or marker["fetched_at"],
+                timedelta(hours=6) if schedule_thread else FORUM_REFRESH_AFTER,
             ):
                 continue
             try:

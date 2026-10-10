@@ -19,6 +19,7 @@ from .assignment_state import is_submission_required, submission_requirement_lab
 from .assignment_summary import current_summary
 from .exam_notices import collect_exam_notices, exam_notice_label
 from .progress import progress_verified
+from .submission_notices import collect_submission_notices, submission_notice_label
 
 
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -84,6 +85,7 @@ class DailyReport:
     completion_by_course: list[dict]
     untracked: list[dict]
     exam_notices: list[dict] = field(default_factory=list)
+    submission_notices: list[dict] = field(default_factory=list)
 
 
 def _board_category(board_name: str | None, subject: str | None = None) -> str:
@@ -584,6 +586,9 @@ def build_daily_report(
         completion_by_course=completion_by_course,
         untracked=untracked,
         exam_notices=collect_exam_notices(store, target=target, year=year, semester=semester),
+        submission_notices=collect_submission_notices(
+            store, target=target, year=year, semester=semester, assignments=semester_assignments,
+        ),
     )
 
 
@@ -646,6 +651,7 @@ def render_report(report: DailyReport) -> str:
         ]
 
     lines += _exam_notice_text_lines(report)
+    lines += _submission_notice_text_lines(report)
     lines += ["", f"오늘 공개된 항목 ({len(report.opened)})"]
     lines += [
         f"- [{r['course_name']}] {r['title']} · {_status(r)} · {r['open_from']}"
@@ -977,10 +983,26 @@ def _exam_notice_text_lines(report: DailyReport) -> list[str]:
     return lines
 
 
+def _submission_notice_text_lines(report: DailyReport) -> list[str]:
+    if not report.submission_notices:
+        return []
+    lines = ["", f"과제·제출 일정·공지 ({len(report.submission_notices)}개)",
+             "공지 일정과 확인된 제출 상태를 함께 표시합니다. 외부 제출물은 제출 여부를 별도로 확인하세요."]
+    for row in report.submission_notices:
+        lines.append(f"- {row['course_name']} · {row['title']}")
+        lines.append(f"  {submission_notice_label(row)}")
+        if row.get("excerpt"):
+            lines.append(f"  {row['excerpt']}")
+        if row.get("url"):
+            lines.append(f"  {row['url']}")
+    return lines
+
+
 def _ordinary_new_posts(report: DailyReport) -> list[dict]:
-    exam_keys = {(r["cmid"], r["modname"], r["post_id"]) for r in report.exam_notices}
+    notice_keys = {(r["cmid"], r["modname"], r["post_id"])
+                   for r in report.exam_notices + report.submission_notices}
     return [r for r in report.new_posts
-            if (r["cmid"], r["modname"], r["post_id"]) not in exam_keys]
+            if (r["cmid"], r["modname"], r["post_id"]) not in notice_keys]
 
 
 def render_email_text(report: DailyReport, *, assignment_actions: dict[int, str] | None = None) -> str:
@@ -1022,6 +1044,7 @@ def render_email_text(report: DailyReport, *, assignment_actions: dict[int, str]
         lines += ["", "주의: 오늘 자료를 아직 모두 확인하지 못해 내용이 달라질 수 있습니다."]
 
     lines += _exam_notice_text_lines(report)
+    lines += _submission_notice_text_lines(report)
     due_today = assignments_due_today(report)
     lines += ["", f"오늘 마감 과제 ({len(due_today)}개)"]
     for row in due_today:
@@ -1219,6 +1242,17 @@ def render_report_html(report: DailyReport, *, assignment_actions: dict[int, str
                 exam_notice_label(r), r.get("url"), r.get("excerpt") or "",
             ) for r in report.exam_notices),
             "공지 원문에서 확인한 일정입니다. 예정된 시험은 시험일까지 표시합니다.",
+        ))
+    if report.submission_notices:
+        rows.append(section(
+            f"과제·제출 일정·공지 ({len(report.submission_notices)}개)",
+            "".join(item(
+                r["title"], r["course_name"], submission_notice_label(r),
+                r.get("url"), r.get("excerpt") or "",
+                (assignment_actions or {}).get(r["linked_assignments"][0]["cmid"])
+                if r.get("linked_assignments") and is_submission_required(r["linked_assignments"][0]) else None,
+            ) for r in report.submission_notices),
+            "공지 일정과 확인된 제출 상태를 함께 표시합니다. 외부 제출물은 제출 여부를 별도로 확인하세요.",
         ))
     due_today = assignments_due_today(report)
     rows.append(section(

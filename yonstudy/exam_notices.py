@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 
+from .notice_sources import current_notice_posts, notice_excerpt as _excerpt, notice_version as _version
+
 
 EXAM_SUBJECT = re.compile(r"중간\s*(?:고사|시험)|기말\s*(?:고사|시험)|시험|\bmid[ -]?term\b|\b(?:final\s+)?exams?\b", re.I)
 _KINDS = re.compile(r"(?P<mid>중간\s*(?:고사|시험)|\bmid[ -]?term\b)|(?P<final>기말\s*(?:고사|시험)|\bfinal\s+exams?\b)", re.I)
@@ -20,8 +22,6 @@ _ENGLISH_DATE = re.compile(
     r"Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+"
     r"(?P<day>\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s+(?P<year>20\d{2}))?", re.I,
 )
-_NOTICE_BOARD = re.compile(r"공지|announcements?|notices?", re.I)
-_QUESTION_BOARD = re.compile(r"질의|질문|문의|q\s*&\s*a|qna", re.I)
 _CHANGE = re.compile(r"변경|정정|연기|취소|reschedul|postpon|cancel", re.I)
 _WHEN = re.compile(r"일시|시험일|시험\s*날짜|날짜\s*:|\bdate\s*:|\bon\s*$|\b(?:held|place|scheduled)\b", re.I)
 _OTHER_DATE = re.compile(r"과제|제출|범위|페이지|작성일|등록일|수정일|assignment|deadline|due\b|chapter|section|pages?\b|posted|updated", re.I)
@@ -33,18 +33,6 @@ def is_exam_subject(subject: str | None) -> bool:
 
 def _kind(match) -> str:
     return "중간시험" if match.lastgroup == "mid" else "기말시험"
-
-
-def _version(row: dict) -> str:
-    # 수정일이 있는 사이트 문자열은 마지막 날짜를 사용한다.
-    written = re.findall(r"20\d{2}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2})?", row.get("written_at") or "")
-    return max([value.replace(" ", "T") for value in written]
-               + [row.get("updated_at") or "", row.get("fetched_at") or ""])
-
-
-def _excerpt(body: str, limit: int = 500) -> str:
-    text = " ".join(body.split())
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
 def _entries(row: dict, *, year: int) -> list[dict]:
@@ -103,23 +91,11 @@ def _entries(row: dict, *, year: int) -> list[dict]:
 
 
 def collect_exam_notices(store, *, target: date, year: str, semester: str) -> list[dict]:
-    rows = store.query(
-        """SELECT p.cmid,p.post_id,p.modname,p.subject AS title,p.body,p.url,
-                  p.written_at,p.fetched_at,p.updated_at,c.course_id,c.name AS course_name,
-                  a.title AS board_name
-             FROM post p JOIN course c ON c.course_id=p.course_id
-             LEFT JOIN activity a ON a.cmid=p.cmid
-            WHERE c.year=? AND c.semester=? AND c.enrolled=1
-              AND COALESCE(a.present,1)=1
-              AND NOT (p.modname='forum' AND p.post_id LIKE 't%')""", (year, semester),
-    )
+    rows = current_notice_posts(store, year=year, semester=semester)
     schedules = {}
     undated = []
     for source in rows:
         row = dict(source)
-        board = row.get("board_name") or ""
-        if not _NOTICE_BOARD.search(board) or _QUESTION_BOARD.search(board):
-            continue
         if not is_exam_subject(row["title"]):
             continue
         for entry in _entries(row, year=int(year)):
