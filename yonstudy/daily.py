@@ -482,7 +482,7 @@ def build_daily_report(
                a.url,a.section_idx,a.section_name,a.open_from,a.open_to,
                COALESCE(a.late_until,d.late_until) AS late_until,
                a.completion,s.submitted,s.status,s.grading_status,
-               COALESCE(s.due_at,d.due_at) AS due_at,
+               COALESCE(s.due_at,d.due_at) AS due_at,s.due_at AS site_due_at,
                d.due_at AS inferred_due_at,d.source_kind AS deadline_source_kind,
                d.source_url AS deadline_source_url,d.evidence AS deadline_evidence,
                s.last_modified,s.grade,s.seen_at,s.instructions,

@@ -116,6 +116,15 @@ class SubmissionNoticeTests(unittest.TestCase):
         self.assertEqual(row["notice_due_at"], "2026-10-14")
         self.assertNotIn("23:59", submission_notice_label(row))
 
+    def test_inferred_deadline_is_not_labeled_as_an_explicit_site_time(self):
+        self.notice(body="The deadline is October 14.")
+        self.assignment(due=None)
+        self.store.save_assignment_deadline({"cmid": 30, "due_at": "2026-10-14 23:59", "source_kind": "post"})
+        row = self.report().submission_notices[0]
+        self.assertEqual(row["notice_due_at"], "2026-10-14")
+        self.assertNotIn("사이트 마감", submission_notice_label(row))
+        self.assertNotIn("23:59", submission_notice_label(row))
+
     def test_submission_times_without_minutes_or_meridiem_are_preserved(self):
         for body, expected in (("제출 마감: 10/14 18시", "2026-10-14 18:00"),
                                ("Due: October 14 at 6PM", "2026-10-14 18:00")):

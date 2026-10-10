@@ -184,8 +184,8 @@ def submission_notice_label(row: dict) -> str:
         labels.append("본인 제출 불필요" if not is_submission_required(assignment) else
                       "제출 완료" if assignment.get("submitted") == 1 else
                       "미제출" if assignment.get("submitted") == 0 else "제출 상태 미확인")
-        if assignment.get("due_at"):
-            site_due = assignment["due_at"]
+        if assignment.get("site_due_at"):
+            site_due = assignment["site_due_at"]
             match = re.search(r"(20\d{2})\D+(\d{1,2})\D+(\d{1,2})(?:\D+(\d{1,2}):(\d{2}))?", site_due)
             if match:
                 site_due = f"{match[1]}-{int(match[2]):02d}-{int(match[3]):02d}"
